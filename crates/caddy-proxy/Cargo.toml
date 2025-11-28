@@ -1,0 +1,32 @@
+[package]
+name = "caddy-proxy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Reverse proxy implementation for caddy-rs based on Pingora"
+
+[dependencies]
+caddy-core.workspace = true
+caddy-tls.workspace = true
+
+pingora.workspace = true
+pingora-core.workspace = true
+pingora-proxy.workspace = true
+pingora-load-balancing.workspace = true
+pingora-http.workspace = true
+pingora-error.workspace = true
+
+tokio.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+parking_lot.workspace = true
+dashmap.workspace = true
+bytes.workspace = true
+http.workspace = true
+once_cell.workspace = true
+mime_guess.workspace = true
+urlencoding = "2.1"
+
+[dev-dependencies]
+tempfile = "3"
