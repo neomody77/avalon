@@ -14,12 +14,12 @@ caddy-proxy = { path = "crates/caddy-proxy" }
 caddy-tls = { path = "crates/caddy-tls" }
 
 # Pingora
-pingora = { version = "0.3", features = ["lb", "proxy"] }
-pingora-core = "0.3"
-pingora-proxy = "0.3"
-pingora-load-balancing = "0.3"
-pingora-http = "0.3"
-pingora-error = "0.3"
+pingora = { version = "0.6", features = ["lb", "proxy"] }
+pingora-core = "0.6"
+pingora-proxy = "0.6"
+pingora-load-balancing = "0.6"
+pingora-http = "0.6"
+pingora-error = "0.6"
 
 # TLS/ACME
 instant-acme = "0.7"

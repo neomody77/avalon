@@ -1,0 +1,9 @@
+/Users/mira/playground/caddy-rs/target/debug/build/libz-ng-sys-89af41d2c91dc12b/out/lib/libz-ng.a
+/Users/mira/playground/caddy-rs/target/debug/build/libz-ng-sys-89af41d2c91dc12b/out/include/zlib-ng.h
+/Users/mira/playground/caddy-rs/target/debug/build/libz-ng-sys-89af41d2c91dc12b/out/include/zlib_name_mangling-ng.h
+/Users/mira/playground/caddy-rs/target/debug/build/libz-ng-sys-89af41d2c91dc12b/out/include/zconf-ng.h
+/Users/mira/playground/caddy-rs/target/debug/build/libz-ng-sys-89af41d2c91dc12b/out/lib/pkgconfig/zlib-ng.pc
+/Users/mira/playground/caddy-rs/target/debug/build/libz-ng-sys-89af41d2c91dc12b/out/lib/cmake/zlib-ng/zlib-ng.cmake
+/Users/mira/playground/caddy-rs/target/debug/build/libz-ng-sys-89af41d2c91dc12b/out/lib/cmake/zlib-ng/zlib-ng-debug.cmake
+/Users/mira/playground/caddy-rs/target/debug/build/libz-ng-sys-89af41d2c91dc12b/out/lib/cmake/zlib-ng/zlib-ng-config.cmake
+/Users/mira/playground/caddy-rs/target/debug/build/libz-ng-sys-89af41d2c91dc12b/out/lib/cmake/zlib-ng/zlib-ng-config-version.cmake

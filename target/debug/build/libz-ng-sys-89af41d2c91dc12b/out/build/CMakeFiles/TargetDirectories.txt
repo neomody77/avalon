@@ -1,0 +1,9 @@
+/Users/mira/playground/caddy-rs/target/debug/build/libz-ng-sys-89af41d2c91dc12b/out/build/CMakeFiles/zlib.dir
+/Users/mira/playground/caddy-rs/target/debug/build/libz-ng-sys-89af41d2c91dc12b/out/build/CMakeFiles/package.dir
+/Users/mira/playground/caddy-rs/target/debug/build/libz-ng-sys-89af41d2c91dc12b/out/build/CMakeFiles/package_source.dir
+/Users/mira/playground/caddy-rs/target/debug/build/libz-ng-sys-89af41d2c91dc12b/out/build/CMakeFiles/edit_cache.dir
+/Users/mira/playground/caddy-rs/target/debug/build/libz-ng-sys-89af41d2c91dc12b/out/build/CMakeFiles/rebuild_cache.dir
+/Users/mira/playground/caddy-rs/target/debug/build/libz-ng-sys-89af41d2c91dc12b/out/build/CMakeFiles/list_install_components.dir
+/Users/mira/playground/caddy-rs/target/debug/build/libz-ng-sys-89af41d2c91dc12b/out/build/CMakeFiles/install.dir
+/Users/mira/playground/caddy-rs/target/debug/build/libz-ng-sys-89af41d2c91dc12b/out/build/CMakeFiles/install/local.dir
+/Users/mira/playground/caddy-rs/target/debug/build/libz-ng-sys-89af41d2c91dc12b/out/build/CMakeFiles/install/strip.dir
