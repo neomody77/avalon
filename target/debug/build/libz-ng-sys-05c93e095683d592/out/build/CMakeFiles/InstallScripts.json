@@ -1,7 +1,0 @@
-{
-	"InstallScripts" : 
-	[
-		"/Users/mira/playground/caddy-rs/target/debug/build/libz-ng-sys-05c93e095683d592/out/build/cmake_install.cmake"
-	],
-	"Parallel" : false
-}
