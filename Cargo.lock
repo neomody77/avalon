@@ -426,6 +426,7 @@ dependencies = [
  "caddy-tls",
  "clap 4.5.53",
  "ctrlc",
+ "notify",
  "pingora",
  "pingora-proxy",
  "rustls",

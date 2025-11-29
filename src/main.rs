@@ -11,11 +11,14 @@ use caddy_tls::{
     resolve_acme_ca, shutdown_channel,
 };
 use clap::{Parser, Subcommand};
+use notify::{RecommendedWatcher, RecursiveMode, Watcher, Config as NotifyConfig};
 use pingora::prelude::*;
 use pingora_proxy::http_proxy_service;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tracing::{info, warn, Level};
+use std::sync::mpsc::channel;
+use std::time::Duration;
+use tracing::{info, warn, error, Level};
 use tracing_subscriber::FmtSubscriber;
 
 #[derive(Parser)]
@@ -36,6 +39,10 @@ struct Cli {
     /// Test configuration and exit
     #[arg(short, long)]
     test: bool,
+
+    /// Watch config file and auto-reload on changes
+    #[arg(short, long)]
+    watch: bool,
 }
 
 #[derive(Subcommand)]
@@ -44,6 +51,9 @@ enum Commands {
     Run {
         #[arg(short, long, default_value = "caddy.toml")]
         config: PathBuf,
+        /// Watch config file and auto-reload on changes
+        #[arg(short, long)]
+        watch: bool,
     },
     /// Validate configuration
     Validate {
@@ -80,21 +90,21 @@ fn main() -> Result<()> {
 
     match cli.command {
         Some(Commands::Validate { config }) => validate_config(config),
-        Some(Commands::Run { config }) => run_server(config),
+        Some(Commands::Run { config, watch }) => run_server(config, watch),
         None => {
             if cli.test {
                 validate_config(cli.config)
             } else {
-                run_server(cli.config)
+                run_server(cli.config, cli.watch)
             }
         }
     }
 }
 
 #[allow(unreachable_code)]
-fn run_server(config_path: PathBuf) -> Result<()> {
+fn run_server(config_path: PathBuf, watch_config: bool) -> Result<()> {
     info!("Starting caddy-rs");
-    info!(config = ?config_path, "Loading configuration");
+    info!(config = ?config_path, watch = watch_config, "Loading configuration");
 
     let config = Config::load(&config_path)
         .with_context(|| format!("Failed to load config from {:?}", config_path))?;
@@ -264,6 +274,18 @@ fn run_server(config_path: PathBuf) -> Result<()> {
         let _ = shutdown_tx_clone.send(true);
     }).ok();
 
+    // Start config file watcher if enabled
+    if watch_config {
+        let proxy_for_reload = proxy.clone();
+        let config_path_for_watch = config_path.clone();
+        std::thread::spawn(move || {
+            if let Err(e) = start_config_watcher(config_path_for_watch, proxy_for_reload) {
+                error!(error = %e, "Config watcher failed");
+            }
+        });
+        info!("Config file watcher enabled - changes will trigger auto-reload");
+    }
+
     info!("caddy-rs started successfully");
     server.run_forever();
 
@@ -392,6 +414,74 @@ fn validate_config(config_path: PathBuf) -> Result<()> {
     let domains = config.get_tls_domains();
     if !domains.is_empty() {
         println!("  TLS domains: {:?}", domains);
+    }
+
+    Ok(())
+}
+
+fn start_config_watcher(config_path: PathBuf, proxy: CaddyProxy) -> Result<()> {
+    use notify::event::{EventKind, ModifyKind};
+
+    let (tx, rx) = channel();
+
+    let config = NotifyConfig::default()
+        .with_poll_interval(Duration::from_secs(2));
+
+    let mut watcher: RecommendedWatcher = Watcher::new(tx, config)
+        .context("Failed to create file watcher")?;
+
+    watcher.watch(&config_path, RecursiveMode::NonRecursive)
+        .with_context(|| format!("Failed to watch config file: {:?}", config_path))?;
+
+    info!(path = ?config_path, "Watching config file for changes");
+
+    let mut last_reload = std::time::Instant::now();
+    let debounce_duration = Duration::from_millis(500);
+
+    loop {
+        match rx.recv() {
+            Ok(Ok(event)) => {
+                // Only react to modify events
+                let should_reload = match event.kind {
+                    EventKind::Modify(ModifyKind::Data(_)) => true,
+                    EventKind::Modify(ModifyKind::Any) => true,
+                    _ => false,
+                };
+
+                if should_reload {
+                    // Debounce - avoid rapid reloads
+                    let now = std::time::Instant::now();
+                    if now.duration_since(last_reload) < debounce_duration {
+                        continue;
+                    }
+                    last_reload = now;
+
+                    info!("Config file changed, reloading...");
+
+                    // Small delay to ensure file is fully written
+                    std::thread::sleep(Duration::from_millis(100));
+
+                    match Config::load(&config_path) {
+                        Ok(new_config) => {
+                            match proxy.reload_config(new_config) {
+                                Ok(_) => info!("Configuration reloaded successfully"),
+                                Err(e) => error!(error = %e, "Failed to apply new configuration"),
+                            }
+                        }
+                        Err(e) => {
+                            error!(error = %e, "Failed to parse new configuration, keeping old config");
+                        }
+                    }
+                }
+            }
+            Ok(Err(e)) => {
+                error!(error = %e, "Watch error");
+            }
+            Err(e) => {
+                error!(error = %e, "Channel receive error");
+                break;
+            }
+        }
     }
 
     Ok(())
