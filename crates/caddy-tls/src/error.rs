@@ -13,6 +13,9 @@ pub enum TlsError {
     #[error("Certificate error: {0}")]
     CertificateError(String),
 
+    #[error("Certificate generation error: {0}")]
+    CertGeneration(String),
+
     #[error("Storage error: {0}")]
     Storage(String),
 

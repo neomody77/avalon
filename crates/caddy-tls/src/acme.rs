@@ -10,6 +10,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
+/// Maximum time allowed for a complete ACME certificate acquisition (5 minutes)
+const ACME_TOTAL_TIMEOUT_SECS: u64 = 300;
+
 /// Shared storage for ACME HTTP-01 challenge tokens
 pub type ChallengeTokens = Arc<DashMap<String, String>>;
 
@@ -67,8 +70,74 @@ impl AcmeManager {
         Ok(account)
     }
 
-    /// Obtain a certificate for a domain
+    /// Validate domain name format
+    fn validate_domain(domain: &str) -> Result<(), TlsError> {
+        // Check for empty domain
+        if domain.is_empty() {
+            return Err(TlsError::Acme("Domain name cannot be empty".to_string()));
+        }
+
+        // Check length (max 253 characters for DNS names)
+        if domain.len() > 253 {
+            return Err(TlsError::Acme("Domain name too long".to_string()));
+        }
+
+        // Check for valid characters and structure
+        let labels: Vec<&str> = domain.split('.').collect();
+        if labels.len() < 2 {
+            return Err(TlsError::Acme("Domain must have at least two labels".to_string()));
+        }
+
+        for label in &labels {
+            // Each label must be 1-63 characters
+            if label.is_empty() || label.len() > 63 {
+                return Err(TlsError::Acme(format!("Invalid label length in domain: {}", domain)));
+            }
+
+            // Labels must start with alphanumeric
+            if !label.chars().next().map(|c| c.is_ascii_alphanumeric()).unwrap_or(false) {
+                return Err(TlsError::Acme(format!("Domain label must start with alphanumeric: {}", domain)));
+            }
+
+            // Labels can only contain alphanumeric and hyphens
+            if !label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+                return Err(TlsError::Acme(format!("Invalid characters in domain: {}", domain)));
+            }
+
+            // Labels cannot end with hyphen
+            if label.ends_with('-') {
+                return Err(TlsError::Acme(format!("Domain label cannot end with hyphen: {}", domain)));
+            }
+        }
+
+        // TLD cannot be all numeric
+        if let Some(tld) = labels.last() {
+            if tld.chars().all(|c| c.is_ascii_digit()) {
+                return Err(TlsError::Acme(format!("TLD cannot be all numeric: {}", domain)));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Obtain a certificate for a domain with timeout protection
     pub async fn obtain_certificate(&self, domain: &str) -> Result<CertBundle, TlsError> {
+        // Validate domain first
+        Self::validate_domain(domain)?;
+
+        // Wrap the entire operation in a timeout
+        let timeout_duration = Duration::from_secs(ACME_TOTAL_TIMEOUT_SECS);
+        match tokio::time::timeout(timeout_duration, self.obtain_certificate_inner(domain)).await {
+            Ok(result) => result,
+            Err(_) => Err(TlsError::Acme(format!(
+                "ACME certificate acquisition timed out after {} seconds",
+                ACME_TOTAL_TIMEOUT_SECS
+            ))),
+        }
+    }
+
+    /// Internal certificate acquisition (without timeout wrapper)
+    async fn obtain_certificate_inner(&self, domain: &str) -> Result<CertBundle, TlsError> {
         info!(domain = %domain, "Obtaining certificate via ACME");
 
         let account = self.get_or_create_account().await?;
@@ -90,33 +159,31 @@ impl AcmeManager {
         for auth in authorizations {
             match auth.status {
                 AuthorizationStatus::Pending => {
-                    // Find HTTP-01 challenge
-                    let challenge = auth
-                        .challenges
-                        .iter()
-                        .find(|c| c.r#type == ChallengeType::Http01)
-                        .ok_or_else(|| TlsError::Acme("No HTTP-01 challenge found".to_string()))?;
+                    // Use HTTP-01 challenge
+                    if let Some(challenge) = auth.challenges.iter().find(|c| c.r#type == ChallengeType::Http01) {
+                        let key_auth = order.key_authorization(challenge);
 
-                    let key_auth = order.key_authorization(challenge);
+                        // Store token for HTTP server to respond
+                        debug!(token = %challenge.token, "Setting up HTTP-01 challenge");
+                        self.challenge_tokens.insert(
+                            challenge.token.clone(),
+                            key_auth.as_str().to_string(),
+                        );
 
-                    // Store token for HTTP server to respond
-                    debug!(token = %challenge.token, "Setting up HTTP-01 challenge");
-                    self.challenge_tokens.insert(
-                        challenge.token.clone(),
-                        key_auth.as_str().to_string(),
-                    );
+                        // Tell ACME server we're ready
+                        order
+                            .set_challenge_ready(&challenge.url)
+                            .await
+                            .map_err(|e| TlsError::Acme(e.to_string()))?;
 
-                    // Tell ACME server we're ready
-                    order
-                        .set_challenge_ready(&challenge.url)
-                        .await
-                        .map_err(|e| TlsError::Acme(e.to_string()))?;
+                        // Wait for validation
+                        self.wait_for_order_ready(&mut order, 10).await?;
 
-                    // Wait for validation
-                    self.wait_for_order_ready(&mut order, 10).await?;
-
-                    // Clean up token
-                    self.challenge_tokens.remove(&challenge.token);
+                        // Clean up token
+                        self.challenge_tokens.remove(&challenge.token);
+                    } else {
+                        return Err(TlsError::Acme("No supported challenge type found".to_string()));
+                    }
                 }
                 AuthorizationStatus::Valid => {
                     debug!("Authorization already valid");
