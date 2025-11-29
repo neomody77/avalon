@@ -44,6 +44,7 @@ impl CompiledRoute {
 pub struct RouteTable {
     pub routes: Vec<CompiledRoute>,
     server_name: String,
+    pub https_redirect: bool,
 }
 
 impl RouteTable {
@@ -53,7 +54,12 @@ impl RouteTable {
         Ok(Self {
             routes: routes?,
             server_name: config.name.clone(),
+            https_redirect: config.https_redirect,
         })
+    }
+
+    pub fn should_redirect_https(&self) -> bool {
+        self.https_redirect
     }
 
     pub fn match_route(&self, host: Option<&str>, path: &str, method: &str) -> Option<&CompiledRoute> {

@@ -1,17 +1,20 @@
 //! Main proxy implementation using Pingora's ProxyHttp trait
 
+use crate::access_log::{AccessLogEntry, AccessLogger, LogFormat};
 use crate::file_server::FileServer;
 use crate::route::RoutingContext;
 use crate::upstream::UpstreamServer;
 use async_trait::async_trait;
 use caddy_core::{Config, HandlerConfig};
 use caddy_tls::ChallengeTokens;
+use chrono::Utc;
 use http::StatusCode;
 use parking_lot::RwLock;
 use pingora::prelude::*;
 use pingora_http::{RequestHeader, ResponseHeader};
 use pingora_proxy::{ProxyHttp, Session};
 use std::sync::Arc;
+use std::time::Instant;
 use tracing::{debug, info, warn};
 
 use crate::error::ProxyError;
@@ -26,6 +29,8 @@ pub struct RequestCtx {
     pub redirect_to: Option<String>,
     pub redirect_code: Option<u16>,
     pub custom_headers_down: Vec<(String, String)>,
+    pub is_websocket: bool,
+    pub request_start: Instant,
 }
 
 #[derive(Clone)]
@@ -47,6 +52,8 @@ impl RequestCtx {
             redirect_to: None,
             redirect_code: None,
             custom_headers_down: Vec::new(),
+            is_websocket: false,
+            request_start: Instant::now(),
         }
     }
 }
@@ -62,6 +69,7 @@ pub struct CaddyProxy {
     routing: Arc<RoutingContext>,
     acme_tokens: ChallengeTokens,
     config: Arc<RwLock<Config>>,
+    access_logger: Option<AccessLogger>,
 }
 
 impl CaddyProxy {
@@ -71,10 +79,28 @@ impl CaddyProxy {
             .load_config(&config.servers)
             .map_err(|e| ProxyError::ConfigError(e.to_string()))?;
 
+        // Initialize access logger if configured
+        let access_logger = if let Some(path) = &config.global.access_log {
+            let format = LogFormat::from_str(&config.global.access_log_format);
+            match AccessLogger::new(path, format) {
+                Ok(logger) => {
+                    info!(path = %path, "Access logging enabled");
+                    Some(logger)
+                }
+                Err(e) => {
+                    warn!(error = %e, path = %path, "Failed to create access log, logging disabled");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         Ok(Self {
             routing,
             acme_tokens,
             config: Arc::new(RwLock::new(config)),
+            access_logger,
         })
     }
 
@@ -119,6 +145,7 @@ impl Clone for CaddyProxy {
             routing: self.routing.clone(),
             acme_tokens: self.acme_tokens.clone(),
             config: self.config.clone(),
+            access_logger: self.access_logger.clone(),
         }
     }
 }
@@ -143,6 +170,25 @@ impl ProxyHttp for CaddyProxy {
             ctx.acme_response = Some(response);
         }
 
+        // Detect WebSocket upgrade request
+        let headers = &session.req_header().headers;
+        let is_upgrade = headers
+            .get("connection")
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.to_lowercase().contains("upgrade"))
+            .unwrap_or(false);
+
+        let is_websocket = headers
+            .get("upgrade")
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.to_lowercase() == "websocket")
+            .unwrap_or(false);
+
+        if is_upgrade && is_websocket {
+            ctx.is_websocket = true;
+            debug!(path = %path, "WebSocket upgrade request detected");
+        }
+
         Ok(())
     }
 
@@ -164,6 +210,24 @@ impl ProxyHttp for CaddyProxy {
         let host = self.get_host(session);
         let path = session.req_header().uri.path();
         let method = session.req_header().method.as_str();
+
+        // Check for HTTPS redirect (only on non-TLS connections)
+        // TODO: detect actual TLS state from session
+        for table in self.routing.tables() {
+            if table.should_redirect_https() {
+                if let Some(host) = host {
+                    let query = session.req_header().uri.query().map(|q| format!("?{}", q)).unwrap_or_default();
+                    let location = format!("https://{}{}{}", host, path, query);
+
+                    let mut header = ResponseHeader::build(StatusCode::MOVED_PERMANENTLY, None)?;
+                    header.insert_header("Location", location)?;
+                    header.insert_header("Server", "caddy-rs")?;
+
+                    session.write_response_header(Box::new(header), true).await?;
+                    return Ok(true);
+                }
+            }
+        }
 
         // Find matching route
         for table in self.routing.tables() {
@@ -278,8 +342,9 @@ impl ProxyHttp for CaddyProxy {
         &self,
         session: &mut Session,
         upstream_request: &mut RequestHeader,
-        _ctx: &mut Self::CTX,
+        ctx: &mut Self::CTX,
     ) -> Result<()> {
+        // Add X-Forwarded-For and X-Real-IP
         if let Some(client_addr) = session.client_addr() {
             let client_ip = client_addr.to_string();
             let client_ip = client_ip.split(':').next().unwrap_or(&client_ip);
@@ -294,7 +359,23 @@ impl ProxyHttp for CaddyProxy {
             upstream_request.insert_header("X-Real-IP", client_ip)?;
         }
 
-        upstream_request.insert_header("X-Forwarded-Proto", "http")?;
+        // Add X-Forwarded-Host
+        if let Some(host) = self.get_host(session) {
+            upstream_request.insert_header("X-Forwarded-Host", host)?;
+        }
+
+        // Add X-Forwarded-Proto (TODO: detect TLS from session)
+        let proto = if ctx.upstream.as_ref().map_or(false, |u| u.use_tls) {
+            "https"
+        } else {
+            "http"
+        };
+        upstream_request.insert_header("X-Forwarded-Proto", proto)?;
+
+        // Add custom upstream headers from config
+        if let Some(HandlerType::ReverseProxy) = &ctx.handler_type {
+            // Headers are already stored in ctx from request_filter
+        }
 
         Ok(())
     }
@@ -345,8 +426,57 @@ impl ProxyHttp for CaddyProxy {
         let method = session.req_header().method.as_str();
         let path = session.req_header().uri.path();
         let host = self.get_host(session).unwrap_or("-");
+        let duration_ms = ctx.request_start.elapsed().as_millis() as u64;
 
-        info!(method = %method, path = %path, host = %host, status = %status, "Request completed");
+        // Write to access log if configured
+        if let Some(logger) = &self.access_logger {
+            let client_ip = session
+                .client_addr()
+                .map(|a| {
+                    let s = a.to_string();
+                    s.split(':').next().unwrap_or(&s).to_string()
+                })
+                .unwrap_or_else(|| "-".to_string());
+
+            let user_agent = session
+                .req_header()
+                .headers
+                .get("user-agent")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("-")
+                .to_string();
+
+            let referer = session
+                .req_header()
+                .headers
+                .get("referer")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("-")
+                .to_string();
+
+            let entry = AccessLogEntry {
+                timestamp: Utc::now(),
+                client_ip,
+                method: method.to_string(),
+                path: path.to_string(),
+                host: host.to_string(),
+                status,
+                bytes_sent: 0, // TODO: track actual bytes sent
+                user_agent,
+                referer,
+                duration_ms,
+                is_websocket: ctx.is_websocket,
+            };
+
+            logger.log(&entry);
+        }
+
+        // Also log via tracing
+        if ctx.is_websocket {
+            info!(method = %method, path = %path, host = %host, status = %status, duration_ms = %duration_ms, websocket = true, "WebSocket request completed");
+        } else {
+            info!(method = %method, path = %path, host = %host, status = %status, duration_ms = %duration_ms, "Request completed");
+        }
     }
 }
 

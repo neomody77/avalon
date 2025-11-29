@@ -43,21 +43,40 @@ impl FileServer {
     pub async fn serve(&self, path: &str) -> FileResponse {
         let sanitized = sanitize_path(path);
 
-        // Check for path traversal
+        // Check for path traversal in raw path
         if sanitized.contains("..") || is_hidden_path(&sanitized) {
             return self.error_response(StatusCode::FORBIDDEN, "Forbidden");
         }
 
         let full_path = self.root.join(&sanitized);
 
-        if !full_path.starts_with(&self.root) {
+        // Resolve symlinks and canonicalize to prevent symlink-based path traversal
+        let canonical_root = match self.root.canonicalize() {
+            Ok(p) => p,
+            Err(_) => return self.error_response(StatusCode::INTERNAL_SERVER_ERROR, "Server error"),
+        };
+
+        let canonical_path = match full_path.canonicalize() {
+            Ok(p) => p,
+            Err(_) => {
+                // File doesn't exist - that's okay, we'll return 404 later
+                // But first check if the non-canonical path would escape
+                if !full_path.starts_with(&self.root) {
+                    return self.error_response(StatusCode::FORBIDDEN, "Forbidden");
+                }
+                return self.error_response(StatusCode::NOT_FOUND, "Not Found");
+            }
+        };
+
+        // Verify canonical path is still within root (catches symlink escapes)
+        if !canonical_path.starts_with(&canonical_root) {
             return self.error_response(StatusCode::FORBIDDEN, "Forbidden");
         }
 
-        if full_path.is_dir() {
+        if canonical_path.is_dir() {
             // Try index files
             for index in &self.index_files {
-                let index_path = full_path.join(index);
+                let index_path = canonical_path.join(index);
                 if index_path.is_file() {
                     return self.serve_file(&index_path).await;
                 }
@@ -65,14 +84,14 @@ impl FileServer {
 
             // Directory listing
             if self.browse {
-                return self.serve_directory(&full_path, path).await;
+                return self.serve_directory(&canonical_path, path).await;
             } else {
                 return self.error_response(StatusCode::FORBIDDEN, "Directory listing disabled");
             }
         }
 
-        if full_path.is_file() {
-            return self.serve_file(&full_path).await;
+        if canonical_path.is_file() {
+            return self.serve_file(&canonical_path).await;
         }
 
         self.error_response(StatusCode::NOT_FOUND, "Not Found")

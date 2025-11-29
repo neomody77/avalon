@@ -58,28 +58,32 @@ impl UpstreamServer {
 }
 
 fn parse_address(addr: &str) -> Result<SocketAddr> {
+    use std::net::ToSocketAddrs;
+
+    // Try direct parse first (e.g., "127.0.0.1:8080")
     if let Ok(addr) = addr.parse() {
         return Ok(addr);
     }
 
-    let parts: Vec<&str> = addr.rsplitn(2, ':').collect();
-    if parts.len() != 2 {
-        return Err(ProxyError::ConfigError(format!("Invalid address: {}", addr)));
+    // Try DNS resolution (e.g., "example.com:80")
+    match addr.to_socket_addrs() {
+        Ok(mut addrs) => {
+            addrs.next().ok_or_else(|| {
+                ProxyError::ConfigError(format!("No addresses found for: {}", addr))
+            })
+        }
+        Err(_) => {
+            // Try adding default port if missing
+            let parts: Vec<&str> = addr.rsplitn(2, ':').collect();
+            if parts.len() != 2 {
+                return Err(ProxyError::ConfigError(format!(
+                    "Invalid address (missing port): {}",
+                    addr
+                )));
+            }
+            Err(ProxyError::ConfigError(format!("Cannot resolve: {}", addr)))
+        }
     }
-
-    let port: u16 = parts[0]
-        .parse()
-        .map_err(|_| ProxyError::ConfigError(format!("Invalid port: {}", addr)))?;
-
-    let host = parts[1];
-    let ip = match host {
-        "localhost" => "127.0.0.1",
-        _ => host,
-    };
-
-    format!("{}:{}", ip, port)
-        .parse()
-        .map_err(|_| ProxyError::ConfigError(format!("Cannot resolve: {}", addr)))
 }
 
 /// Upstream selector with load balancing
@@ -128,10 +132,11 @@ impl UpstreamSelector {
                 healthy[idx]
             }
             LoadBalancingStrategy::LeastConn => {
+                // Safe: we already checked healthy.is_empty() above
                 healthy
                     .iter()
                     .min_by_key(|s| s.connection_count())
-                    .unwrap()
+                    .expect("healthy list is not empty")
             }
             LoadBalancingStrategy::First => healthy[0],
             LoadBalancingStrategy::IpHash => {
@@ -167,6 +172,15 @@ mod tests {
     fn test_parse_address_invalid() {
         assert!(parse_address("no-port").is_err());
         assert!(parse_address(":").is_err());
+    }
+
+    #[test]
+    fn test_parse_address_dns() {
+        // Test DNS resolution
+        let result = parse_address("localhost:80");
+        assert!(result.is_ok());
+        let addr = result.unwrap();
+        assert_eq!(addr.port(), 80);
     }
 
     #[test]

@@ -26,6 +26,7 @@ bytes.workspace = true
 http.workspace = true
 once_cell.workspace = true
 mime_guess.workspace = true
+chrono.workspace = true
 urlencoding = "2.1"
 
 [dev-dependencies]
