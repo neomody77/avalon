@@ -129,6 +129,18 @@ pub struct GlobalConfig {
     /// Log level
     #[serde(default = "default_log_level")]
     pub log_level: String,
+
+    /// Access log file path (optional)
+    #[serde(default)]
+    pub access_log: Option<String>,
+
+    /// Access log format: "common", "json", or "combined"
+    #[serde(default = "default_log_format")]
+    pub access_log_format: String,
+}
+
+fn default_log_format() -> String {
+    "common".to_string()
 }
 
 fn default_admin_listen() -> String {
@@ -144,6 +156,8 @@ impl Default for GlobalConfig {
         Self {
             admin_listen: default_admin_listen(),
             log_level: default_log_level(),
+            access_log: None,
+            access_log_format: default_log_format(),
         }
     }
 }
@@ -166,6 +180,14 @@ pub struct TlsConfig {
     /// Enable ACME
     #[serde(default = "default_acme_enabled")]
     pub acme_enabled: bool,
+
+    /// Explicit certificate file path (takes priority over auto-discovery and ACME)
+    #[serde(default)]
+    pub cert_path: Option<PathBuf>,
+
+    /// Explicit private key file path (takes priority over auto-discovery and ACME)
+    #[serde(default)]
+    pub key_path: Option<PathBuf>,
 }
 
 fn default_acme_ca() -> String {
@@ -187,6 +209,8 @@ impl Default for TlsConfig {
             acme_ca: default_acme_ca(),
             storage_path: default_storage_path(),
             acme_enabled: default_acme_enabled(),
+            cert_path: None,
+            key_path: None,
         }
     }
 }

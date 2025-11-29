@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use tokio::fs;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
+use x509_parser::prelude::*;
 
 /// Certificate bundle containing cert and private key
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -149,10 +150,11 @@ impl CertStorage {
 
     /// Get the PEM file paths for a domain
     pub fn get_pem_paths(&self, domain: &str) -> (PathBuf, PathBuf) {
-        let base = self.base_path.join("certs").join(sanitize_domain(domain));
+        let sanitized = sanitize_domain(domain);
+        let certs_dir = self.base_path.join("certs");
         (
-            base.with_extension("crt"),
-            base.with_extension("key"),
+            certs_dir.join(format!("{}.crt", sanitized)),
+            certs_dir.join(format!("{}.key", sanitized)),
         )
     }
 
@@ -161,6 +163,17 @@ impl CertStorage {
         let (cert_path, key_path) = self.get_pem_paths(&bundle.domain);
         fs::write(&cert_path, &bundle.certificate_pem).await?;
         fs::write(&key_path, &bundle.private_key_pem).await?;
+
+        // Set restrictive permissions on private key (Unix only)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let permissions = std::fs::Permissions::from_mode(0o600);
+            if let Err(e) = std::fs::set_permissions(&key_path, permissions) {
+                tracing::warn!(path = ?key_path, error = %e, "Failed to set key file permissions");
+            }
+        }
+
         Ok((cert_path, key_path))
     }
 }
@@ -171,6 +184,254 @@ fn sanitize_domain(domain: &str) -> String {
         .chars()
         .map(|c| if c.is_alphanumeric() || c == '-' || c == '.' { c } else { '_' })
         .collect()
+}
+
+// ============================================================================
+// Certificate Discovery
+// ============================================================================
+
+/// Discovered certificate with metadata
+#[derive(Debug, Clone)]
+pub struct DiscoveredCert {
+    /// Path to certificate file
+    pub cert_path: PathBuf,
+    /// Path to private key file
+    pub key_path: PathBuf,
+    /// Domain names in the certificate (CN and SANs)
+    pub domains: Vec<String>,
+    /// Certificate expiration time
+    pub expires_at: DateTime<Utc>,
+    /// Certificate not-before time
+    pub not_before: DateTime<Utc>,
+    /// Is self-signed
+    pub is_self_signed: bool,
+}
+
+impl DiscoveredCert {
+    /// Check if this certificate is valid (not expired and already active)
+    pub fn is_valid(&self) -> bool {
+        let now = Utc::now();
+        now >= self.not_before && now < self.expires_at
+    }
+
+    /// Get remaining validity in days
+    pub fn remaining_days(&self) -> i64 {
+        (self.expires_at - Utc::now()).num_days()
+    }
+}
+
+/// Discover certificates in a directory and its subdirectories
+pub fn discover_certificates<P: AsRef<Path>>(base_path: P) -> Vec<DiscoveredCert> {
+    use walkdir::WalkDir;
+
+    let base_path = base_path.as_ref();
+    let mut discovered = Vec::new();
+    let mut cert_files: Vec<PathBuf> = Vec::new();
+
+    // Find all .crt and .cer files (common certificate extensions)
+    // Note: .pem is excluded as it's ambiguous (could be cert or key)
+    for entry in WalkDir::new(base_path)
+        .max_depth(3)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let path = entry.path();
+        if path.is_file() {
+            if let Some(ext) = path.extension() {
+                let ext = ext.to_string_lossy().to_lowercase();
+                if ext == "crt" || ext == "cer" {
+                    cert_files.push(path.to_path_buf());
+                }
+            }
+        }
+    }
+
+    for cert_path in cert_files {
+        match parse_certificate_file(&cert_path) {
+            Ok(cert_info) => {
+                // Find corresponding key file
+                if let Some(key_path) = find_key_file(&cert_path) {
+                    info!(
+                        cert = ?cert_path,
+                        key = ?key_path,
+                        domains = ?cert_info.0,
+                        expires = %cert_info.1,
+                        "Discovered certificate"
+                    );
+                    discovered.push(DiscoveredCert {
+                        cert_path,
+                        key_path,
+                        domains: cert_info.0,
+                        expires_at: cert_info.1,
+                        not_before: cert_info.2,
+                        is_self_signed: cert_info.3,
+                    });
+                } else {
+                    debug!(cert = ?cert_path, "No matching key file found");
+                }
+            }
+            Err(e) => {
+                debug!(cert = ?cert_path, error = %e, "Failed to parse certificate");
+            }
+        }
+    }
+
+    discovered
+}
+
+/// Parse certificate file and extract domains, expiration, not_before, is_self_signed
+fn parse_certificate_file(path: &Path) -> Result<(Vec<String>, DateTime<Utc>, DateTime<Utc>, bool), String> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| format!("Failed to read cert file: {}", e))?;
+
+    // Parse PEM
+    let pem = ::pem::parse(&content)
+        .map_err(|e| format!("Failed to parse PEM: {}", e))?;
+
+    // Parse X509
+    let (_, cert) = X509Certificate::from_der(pem.contents())
+        .map_err(|e| format!("Failed to parse X509: {:?}", e))?;
+
+    // Extract domains
+    let mut domains = Vec::new();
+
+    // Get CN from subject
+    for rdn in cert.subject().iter_rdn() {
+        for attr in rdn.iter() {
+            if attr.attr_type() == &oid_registry::OID_X509_COMMON_NAME {
+                if let Ok(cn) = attr.as_str() {
+                    domains.push(cn.to_string());
+                }
+            }
+        }
+    }
+
+    // Get SANs
+    if let Ok(Some(san_ext)) = cert.subject_alternative_name() {
+        for name in &san_ext.value.general_names {
+            if let GeneralName::DNSName(dns) = name {
+                let dns_str = dns.to_string();
+                if !domains.contains(&dns_str) {
+                    domains.push(dns_str);
+                }
+            }
+        }
+    }
+
+    // Get validity period
+    let not_before = cert.validity().not_before.to_datetime();
+    let not_after = cert.validity().not_after.to_datetime();
+
+    let not_before_chrono = DateTime::from_timestamp(not_before.unix_timestamp(), 0)
+        .unwrap_or_else(Utc::now);
+    let not_after_chrono = DateTime::from_timestamp(not_after.unix_timestamp(), 0)
+        .unwrap_or_else(Utc::now);
+
+    // Check if self-signed (issuer == subject)
+    let is_self_signed = cert.issuer() == cert.subject();
+
+    Ok((domains, not_after_chrono, not_before_chrono, is_self_signed))
+}
+
+/// Find the corresponding key file for a certificate
+fn find_key_file(cert_path: &Path) -> Option<PathBuf> {
+    let stem = cert_path.file_stem()?.to_string_lossy();
+    let parent = cert_path.parent()?;
+
+    // Try common key file patterns
+    let patterns = [
+        format!("{}.key", stem),
+        format!("{}-key.pem", stem),
+        format!("{}.pem.key", stem),
+        "privkey.pem".to_string(),
+        "private.key".to_string(),
+    ];
+
+    for pattern in &patterns {
+        let key_path = parent.join(pattern);
+        if key_path.exists() {
+            // Verify it's actually a private key
+            if is_private_key_file(&key_path) {
+                return Some(key_path);
+            }
+        }
+    }
+
+    None
+}
+
+/// Check if file contains a private key
+fn is_private_key_file(path: &Path) -> bool {
+    if let Ok(content) = std::fs::read_to_string(path) {
+        content.contains("PRIVATE KEY")
+    } else {
+        false
+    }
+}
+
+/// Find the best certificate for a domain from discovered certificates
+/// Prefers: non-expired > longer validity > non-self-signed
+pub fn find_best_cert_for_domain<'a>(domain: &str, certs: &'a [DiscoveredCert]) -> Option<&'a DiscoveredCert> {
+    let mut matching: Vec<&DiscoveredCert> = certs
+        .iter()
+        .filter(|c| {
+            c.domains.iter().any(|d| {
+                d == domain ||
+                // Wildcard matching
+                (d.starts_with("*.") && domain.ends_with(&d[1..]))
+            })
+        })
+        .filter(|c| c.is_valid())
+        .collect();
+
+    if matching.is_empty() {
+        return None;
+    }
+
+    // Sort by: non-self-signed first, then by expiration (longer validity first)
+    matching.sort_by(|a, b| {
+        // Prefer non-self-signed
+        match (a.is_self_signed, b.is_self_signed) {
+            (false, true) => std::cmp::Ordering::Less,
+            (true, false) => std::cmp::Ordering::Greater,
+            _ => {
+                // If same self-signed status, prefer longer validity
+                b.expires_at.cmp(&a.expires_at)
+            }
+        }
+    });
+
+    matching.first().copied()
+}
+
+/// Auto-discover and select best certificate for a domain
+pub fn auto_select_certificate<P: AsRef<Path>>(
+    base_path: P,
+    domain: &str,
+) -> Option<(PathBuf, PathBuf)> {
+    let certs = discover_certificates(base_path);
+
+    if certs.is_empty() {
+        debug!(domain = %domain, "No certificates discovered");
+        return None;
+    }
+
+    info!(count = certs.len(), "Discovered certificates");
+
+    if let Some(best) = find_best_cert_for_domain(domain, &certs) {
+        info!(
+            domain = %domain,
+            cert = ?best.cert_path,
+            key = ?best.key_path,
+            expires_in_days = best.remaining_days(),
+            is_self_signed = best.is_self_signed,
+            "Selected best certificate"
+        );
+        Some((best.cert_path.clone(), best.key_path.clone()))
+    } else {
+        warn!(domain = %domain, "No valid certificate found for domain");
+        None
+    }
 }
 
 /// Simple hash for filenames

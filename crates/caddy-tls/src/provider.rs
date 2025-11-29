@@ -58,7 +58,7 @@ impl CertResolver {
             .map_err(|e| TlsError::CertificateError(e.to_string()))?
             .ok_or_else(|| TlsError::CertificateError("No private key found".to_string()))?;
 
-        let signing_key = rustls::crypto::aws_lc_rs::sign::any_supported_type(&key)
+        let signing_key = rustls::crypto::ring::sign::any_supported_type(&key)
             .map_err(|e| TlsError::CertificateError(e.to_string()))?;
 
         Ok(Arc::new(CertifiedKey::new(certs, signing_key)))
