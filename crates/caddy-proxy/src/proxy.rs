@@ -1,10 +1,15 @@
 //! Main proxy implementation using Pingora's ProxyHttp trait
 
 use crate::access_log::{AccessLogEntry, AccessLogger, LogFormat};
+use crate::compression::{
+    CompressionConfig, CompressionEncoding, is_already_compressed,
+    select_encoding, should_compress_content_type, compress,
+};
 use crate::file_server::FileServer;
 use crate::route::RoutingContext;
 use crate::upstream::UpstreamServer;
 use async_trait::async_trait;
+use bytes::Bytes;
 use caddy_core::{Config, HandlerConfig};
 use caddy_tls::ChallengeTokens;
 use chrono::Utc;
@@ -31,6 +36,14 @@ pub struct RequestCtx {
     pub custom_headers_down: Vec<(String, String)>,
     pub is_websocket: bool,
     pub request_start: Instant,
+    /// Selected compression encoding based on Accept-Encoding header
+    pub compression_encoding: CompressionEncoding,
+    /// Buffer for response body (for compression)
+    pub response_body_buffer: Vec<u8>,
+    /// Content-Type of the response
+    pub response_content_type: Option<String>,
+    /// Whether the response is already compressed
+    pub response_already_compressed: bool,
 }
 
 #[derive(Clone)]
@@ -54,6 +67,10 @@ impl RequestCtx {
             custom_headers_down: Vec::new(),
             is_websocket: false,
             request_start: Instant::now(),
+            compression_encoding: CompressionEncoding::Identity,
+            response_body_buffer: Vec::new(),
+            response_content_type: None,
+            response_already_compressed: false,
         }
     }
 }
@@ -70,6 +87,7 @@ pub struct CaddyProxy {
     acme_tokens: ChallengeTokens,
     config: Arc<RwLock<Config>>,
     access_logger: Option<AccessLogger>,
+    compression_config: CompressionConfig,
 }
 
 impl CaddyProxy {
@@ -96,11 +114,40 @@ impl CaddyProxy {
             None
         };
 
+        // Initialize compression config from global settings
+        let compression_opts = &config.global.compression;
+        let compression_config = if compression_opts.enabled {
+            CompressionConfig {
+                gzip: compression_opts.gzip,
+                brotli: compression_opts.brotli,
+                min_size: compression_opts.min_size,
+                level: compression_opts.level,
+            }
+        } else {
+            CompressionConfig {
+                gzip: false,
+                brotli: false,
+                min_size: 0,
+                level: 0,
+            }
+        };
+
+        if compression_opts.enabled {
+            info!(
+                gzip = compression_opts.gzip,
+                brotli = compression_opts.brotli,
+                min_size = compression_opts.min_size,
+                level = compression_opts.level,
+                "Compression enabled"
+            );
+        }
+
         Ok(Self {
             routing,
             acme_tokens,
             config: Arc::new(RwLock::new(config)),
             access_logger,
+            compression_config,
         })
     }
 
@@ -146,6 +193,7 @@ impl Clone for CaddyProxy {
             acme_tokens: self.acme_tokens.clone(),
             config: self.config.clone(),
             access_logger: self.access_logger.clone(),
+            compression_config: self.compression_config.clone(),
         }
     }
 }
@@ -188,6 +236,12 @@ impl ProxyHttp for CaddyProxy {
             ctx.is_websocket = true;
             debug!(path = %path, "WebSocket upgrade request detected");
         }
+
+        // Parse Accept-Encoding for compression
+        let accept_encoding = headers
+            .get("accept-encoding")
+            .and_then(|v| v.to_str().ok());
+        ctx.compression_encoding = select_encoding(accept_encoding, &self.compression_config);
 
         Ok(())
     }
@@ -410,7 +464,95 @@ impl ProxyHttp for CaddyProxy {
 
         upstream_response.insert_header("Server", "caddy-rs")?;
 
+        // Check content type for compression eligibility
+        let content_type = upstream_response.headers
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        ctx.response_content_type = content_type.clone();
+
+        // Check if already compressed
+        let content_encoding = upstream_response.headers
+            .get("content-encoding")
+            .and_then(|v| v.to_str().ok());
+        ctx.response_already_compressed = is_already_compressed(content_encoding);
+
+        // Determine if we should compress this response
+        let should_compress = ctx.compression_encoding != CompressionEncoding::Identity
+            && !ctx.response_already_compressed
+            && !ctx.is_websocket
+            && should_compress_content_type(content_type.as_deref());
+
+        if should_compress {
+            // Remove Content-Length as it will change after compression
+            upstream_response.remove_header("content-length");
+            // Set Content-Encoding header
+            upstream_response.insert_header("Content-Encoding", ctx.compression_encoding.header_value())?;
+            // Add Vary header to indicate content varies by Accept-Encoding
+            upstream_response.insert_header("Vary", "Accept-Encoding")?;
+
+            debug!(
+                encoding = %ctx.compression_encoding.header_value(),
+                content_type = ?content_type,
+                "Response will be compressed"
+            );
+        }
+
         Ok(())
+    }
+
+    fn response_body_filter(
+        &self,
+        _session: &mut Session,
+        body: &mut Option<Bytes>,
+        end_of_stream: bool,
+        ctx: &mut Self::CTX,
+    ) -> Result<Option<std::time::Duration>>
+    where
+        Self::CTX: Send + Sync,
+    {
+        // Skip compression for WebSocket, already compressed, or non-compressible content
+        let should_compress = ctx.compression_encoding != CompressionEncoding::Identity
+            && !ctx.response_already_compressed
+            && !ctx.is_websocket
+            && should_compress_content_type(ctx.response_content_type.as_deref());
+
+        if !should_compress {
+            return Ok(None);
+        }
+
+        // Buffer the response body
+        if let Some(b) = body.take() {
+            ctx.response_body_buffer.extend_from_slice(&b);
+        }
+
+        // Only compress when we have the complete response
+        if end_of_stream && !ctx.response_body_buffer.is_empty() {
+            // Skip if body is too small
+            if ctx.response_body_buffer.len() < self.compression_config.min_size {
+                *body = Some(Bytes::copy_from_slice(&ctx.response_body_buffer));
+                return Ok(None);
+            }
+
+            // Compress the body
+            match compress(&ctx.response_body_buffer, ctx.compression_encoding, self.compression_config.level) {
+                Ok(compressed) => {
+                    debug!(
+                        original_size = ctx.response_body_buffer.len(),
+                        compressed_size = compressed.len(),
+                        encoding = %ctx.compression_encoding.header_value(),
+                        "Response compressed"
+                    );
+                    *body = Some(compressed);
+                }
+                Err(e) => {
+                    warn!(error = %e, "Compression failed, sending uncompressed");
+                    *body = Some(Bytes::copy_from_slice(&ctx.response_body_buffer));
+                }
+            }
+        }
+
+        Ok(None)
     }
 
     async fn logging(&self, session: &mut Session, _e: Option<&pingora_core::Error>, ctx: &mut Self::CTX) {

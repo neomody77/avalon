@@ -29,5 +29,9 @@ mime_guess.workspace = true
 chrono.workspace = true
 urlencoding = "2.1"
 
+# Compression
+flate2 = "1.0"
+brotli = "7"
+
 [dev-dependencies]
 tempfile = "3"

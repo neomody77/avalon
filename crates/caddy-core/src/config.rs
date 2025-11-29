@@ -137,6 +137,58 @@ pub struct GlobalConfig {
     /// Access log format: "common", "json", or "combined"
     #[serde(default = "default_log_format")]
     pub access_log_format: String,
+
+    /// Compression configuration
+    #[serde(default)]
+    pub compression: CompressionOptions,
+}
+
+/// Compression configuration options
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompressionOptions {
+    /// Enable compression (default: true)
+    #[serde(default = "default_compression_enabled")]
+    pub enabled: bool,
+
+    /// Enable gzip compression (default: true)
+    #[serde(default = "default_compression_enabled")]
+    pub gzip: bool,
+
+    /// Enable brotli compression (default: true)
+    #[serde(default = "default_compression_enabled")]
+    pub brotli: bool,
+
+    /// Minimum response size to compress in bytes (default: 1024)
+    #[serde(default = "default_compression_min_size")]
+    pub min_size: usize,
+
+    /// Compression level: 1-9 for gzip, 0-11 for brotli (default: 6)
+    #[serde(default = "default_compression_level")]
+    pub level: u32,
+}
+
+fn default_compression_enabled() -> bool {
+    true
+}
+
+fn default_compression_min_size() -> usize {
+    1024
+}
+
+fn default_compression_level() -> u32 {
+    6
+}
+
+impl Default for CompressionOptions {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            gzip: true,
+            brotli: true,
+            min_size: 1024,
+            level: 6,
+        }
+    }
 }
 
 fn default_log_format() -> String {
@@ -158,6 +210,7 @@ impl Default for GlobalConfig {
             log_level: default_log_level(),
             access_log: None,
             access_log_format: default_log_format(),
+            compression: CompressionOptions::default(),
         }
     }
 }

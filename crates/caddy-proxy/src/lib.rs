@@ -4,6 +4,7 @@
 //! Cloudflare's Pingora framework.
 
 pub mod access_log;
+pub mod compression;
 pub mod error;
 pub mod file_server;
 pub mod health;
@@ -13,6 +14,11 @@ pub mod route;
 pub mod upstream;
 
 pub use access_log::{AccessLogEntry, AccessLogger, LogFormat};
+pub use compression::{
+    CompressionConfig, CompressionEncoding, ResponseCompressor,
+    compress, compress_brotli, compress_gzip, is_already_compressed,
+    select_encoding, should_compress_content_type,
+};
 pub use error::*;
 pub use file_server::FileServer;
 pub use health::{HealthCheckConfig, HealthChecker};
