@@ -6,7 +6,10 @@
 use anyhow::{Context, Result};
 use caddy_core::{Config, HandlerConfig};
 use caddy_proxy::{CaddyProxy, HealthCheckConfig, HealthChecker};
-use caddy_tls::{AcmeManager, CertStorage, LETS_ENCRYPT_STAGING};
+use caddy_tls::{
+    AcmeManager, CertStorage, RenewalScheduler, auto_select_certificate, get_acme_ca_name,
+    resolve_acme_ca, shutdown_channel,
+};
 use clap::{Parser, Subcommand};
 use pingora::prelude::*;
 use pingora_proxy::http_proxy_service;
@@ -50,6 +53,11 @@ enum Commands {
 }
 
 fn main() -> Result<()> {
+    // Install rustls crypto provider
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider");
+
     let cli = Cli::parse();
 
     // Setup logging
@@ -83,6 +91,7 @@ fn main() -> Result<()> {
     }
 }
 
+#[allow(unreachable_code)]
 fn run_server(config_path: PathBuf) -> Result<()> {
     info!("Starting caddy-rs");
     info!(config = ?config_path, "Loading configuration");
@@ -99,20 +108,20 @@ fn run_server(config_path: PathBuf) -> Result<()> {
     }).context("Failed to initialize certificate storage")?;
     let storage = Arc::new(storage);
 
-    // Initialize ACME manager
-    let acme_ca = if config.tls.acme_ca.contains("staging") {
-        LETS_ENCRYPT_STAGING
-    } else {
-        &config.tls.acme_ca
-    };
+    // Initialize ACME manager with provider resolution
+    // Supports provider names (e.g., "letsencrypt", "zerossl", "google") or direct URLs
+    let acme_ca = resolve_acme_ca(&config.tls.acme_ca);
+    let ca_name = get_acme_ca_name(&acme_ca);
+    info!(provider = %ca_name, url = %acme_ca, "Using ACME CA");
 
     let acme_manager = AcmeManager::new(
-        acme_ca.to_string(),
+        acme_ca,
         config.tls.email.clone(),
         storage.clone(),
     );
 
-    // Obtain certificates for TLS domains
+    // Check if we have valid certificates (don't obtain yet - server needs to be running first)
+    let mut needs_cert = Vec::new();
     if config.tls.acme_enabled {
         let domains = config.get_tls_domains();
         if !domains.is_empty() {
@@ -125,10 +134,8 @@ fn run_server(config_path: PathBuf) -> Result<()> {
                             info!(domain = %domain, "Certificate valid");
                         }
                         _ => {
-                            info!(domain = %domain, "Obtaining certificate");
-                            if let Err(e) = acme_manager.obtain_certificate(domain).await {
-                                warn!(domain = %domain, error = %e, "Failed to obtain certificate");
-                            }
+                            info!(domain = %domain, "Certificate needed");
+                            needs_cert.push(domain.clone());
                         }
                     }
                 }
@@ -158,9 +165,11 @@ fn run_server(config_path: PathBuf) -> Result<()> {
             // Check for TLS listener
             if is_tls_address(listen_addr) {
                 let domains = config.get_tls_domains();
+                info!(domains = ?domains, "TLS domains found");
                 let first_domain = domains.first().cloned().unwrap_or_else(|| "localhost".to_string());
+                info!(domain = %first_domain, storage_path = ?config.tls.storage_path, "Looking for certificate");
 
-                if let Some((cert_path, key_path)) = get_tls_cert_paths(&config.tls.storage_path, &first_domain) {
+                if let Some((cert_path, key_path)) = get_tls_cert_paths(&config.tls, &first_domain) {
                     let cert_str = cert_path.to_str().unwrap_or("");
                     let key_str = key_path.to_str().unwrap_or("");
 
@@ -191,6 +200,70 @@ fn run_server(config_path: PathBuf) -> Result<()> {
     // Start health checkers
     start_health_checkers(&config, &proxy);
 
+    // Create shutdown channel for graceful shutdown
+    let (shutdown_tx, shutdown_rx) = shutdown_channel();
+
+    // Spawn background ACME certificate acquisition (after server starts)
+    // Use Arc to share the same acme_manager (and its challenge_tokens) with the background thread
+    let acme_manager = Arc::new(acme_manager);
+    if !needs_cert.is_empty() {
+        let acme_manager_bg = acme_manager.clone();
+        std::thread::spawn(move || {
+            // Wait for server to start listening
+            std::thread::sleep(std::time::Duration::from_secs(3));
+
+            let rt = match tokio::runtime::Runtime::new() {
+                Ok(rt) => rt,
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to create tokio runtime for ACME");
+                    return;
+                }
+            };
+            rt.block_on(async {
+                for domain in needs_cert {
+                    info!(domain = %domain, "Obtaining certificate via ACME (background)");
+                    match acme_manager_bg.obtain_certificate(&domain).await {
+                        Ok(_) => info!(domain = %domain, "Certificate obtained successfully"),
+                        Err(e) => warn!(domain = %domain, error = %e, "Failed to obtain certificate"),
+                    }
+                }
+            });
+        });
+    }
+
+    // Start certificate renewal scheduler
+    let domains = config.get_tls_domains();
+    if config.tls.acme_enabled && !domains.is_empty() {
+        let acme_manager_renewal = acme_manager.clone();
+        let storage_renewal = storage.clone();
+        std::thread::spawn(move || {
+            let rt = match tokio::runtime::Runtime::new() {
+                Ok(rt) => rt,
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to create tokio runtime for renewal scheduler");
+                    return;
+                }
+            };
+            rt.block_on(async {
+                let scheduler = RenewalScheduler::new(
+                    acme_manager_renewal,
+                    storage_renewal,
+                    domains,
+                    shutdown_rx,
+                );
+                info!("Starting certificate renewal scheduler");
+                scheduler.start().await.ok();
+            });
+        });
+    }
+
+    // Setup signal handler for graceful shutdown
+    let shutdown_tx_clone = shutdown_tx.clone();
+    ctrlc::set_handler(move || {
+        info!("Received shutdown signal, initiating graceful shutdown...");
+        let _ = shutdown_tx_clone.send(true);
+    }).ok();
+
     info!("caddy-rs started successfully");
     server.run_forever();
 
@@ -201,16 +274,74 @@ fn is_tls_address(addr: &str) -> bool {
     addr.contains(":443") || addr.starts_with("https://")
 }
 
-fn get_tls_cert_paths(storage_path: &PathBuf, domain: &str) -> Option<(PathBuf, PathBuf)> {
-    let base = storage_path.join("certs").join(domain);
-    let cert_path = base.with_extension("crt");
-    let key_path = base.with_extension("key");
+fn get_tls_cert_paths(
+    tls_config: &caddy_core::TlsConfig,
+    domain: &str,
+) -> Option<(PathBuf, PathBuf)> {
+    let storage_path = &tls_config.storage_path;
+
+    // 1. First check explicit config (cert_path/key_path)
+    if let (Some(cert_path), Some(key_path)) = (&tls_config.cert_path, &tls_config.key_path) {
+        if cert_path.exists() && key_path.exists() {
+            info!(
+                cert = ?cert_path, key = ?key_path,
+                "Using explicitly configured certificate"
+            );
+            return Some((cert_path.clone(), key_path.clone()));
+        } else {
+            warn!(
+                cert = ?cert_path, key = ?key_path,
+                "Explicit certificate paths configured but files not found"
+            );
+        }
+    }
+
+    // 2. Auto-discover certificates in storage_path and current working directory
+    info!(domain = %domain, "Trying auto-discovery");
+
+    // Search in storage_path
+    if let Some(paths) = auto_select_certificate(storage_path, domain) {
+        info!(domain = %domain, cert = ?paths.0, key = ?paths.1, "Auto-discovered certificate in storage path");
+        return Some(paths);
+    }
+
+    // Search in current working directory
+    if let Ok(cwd) = std::env::current_dir() {
+        if cwd != *storage_path {
+            if let Some(paths) = auto_select_certificate(&cwd, domain) {
+                info!(domain = %domain, cert = ?paths.0, key = ?paths.1, "Auto-discovered certificate in working directory");
+                return Some(paths);
+            }
+        }
+    }
+
+    // 3. Try ACME stored certs (storage_path/certs/{domain}.crt)
+    // Note: Don't use with_extension() as it replaces after the last dot
+    // (e.g., "api-a.hater.cc" would become "api-a.hater.crt")
+    let cert_path = storage_path.join("certs").join(format!("{}.crt", domain));
+    let key_path = storage_path.join("certs").join(format!("{}.key", domain));
+
+    info!(cert_path = ?cert_path, key_path = ?key_path,
+          cert_exists = cert_path.exists(), key_exists = key_path.exists(),
+          "Checking ACME cert path");
 
     if cert_path.exists() && key_path.exists() {
-        Some((cert_path, key_path))
-    } else {
-        None
+        return Some((cert_path, key_path));
     }
+
+    // 4. Try storage_path/{domain}.crt (manual/self-signed certs)
+    let cert_path = storage_path.join(format!("{}.crt", domain));
+    let key_path = storage_path.join(format!("{}.key", domain));
+
+    info!(cert_path = ?cert_path, key_path = ?key_path,
+          cert_exists = cert_path.exists(), key_exists = key_path.exists(),
+          "Checking manual cert path");
+
+    if cert_path.exists() && key_path.exists() {
+        return Some((cert_path, key_path));
+    }
+
+    None
 }
 
 fn start_health_checkers(config: &Config, proxy: &CaddyProxy) {
