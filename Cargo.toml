@@ -12,6 +12,7 @@ license = "MIT"
 caddy-core = { path = "crates/caddy-core" }
 caddy-proxy = { path = "crates/caddy-proxy" }
 caddy-tls = { path = "crates/caddy-tls" }
+caddy-plugin = { path = "crates/caddy-plugin" }
 
 # Pingora
 pingora = { version = "0.6", features = ["lb", "proxy", "openssl"] }

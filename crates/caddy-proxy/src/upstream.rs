@@ -149,6 +149,48 @@ impl UpstreamSelector {
         debug!(upstream = %server.address_str, strategy = ?self.strategy, "Selected upstream");
         Ok(server.clone())
     }
+
+    /// Select an upstream server based on an affinity key (for session affinity)
+    /// Returns (server, server_index) so the caller can set the affinity cookie
+    pub fn select_with_affinity(&self, affinity_key: Option<&str>) -> Result<(Arc<UpstreamServer>, usize)> {
+        let healthy: Vec<_> = self.servers.iter().enumerate().filter(|(_, s)| s.is_healthy()).collect();
+
+        if healthy.is_empty() {
+            return Err(ProxyError::NoHealthyUpstream);
+        }
+
+        // If we have an affinity key, try to use it
+        if let Some(key) = affinity_key {
+            // Try to parse as server index first
+            if let Ok(idx) = key.parse::<usize>() {
+                // Check if this index points to a healthy server
+                if let Some((_, server)) = healthy.iter().find(|(i, _)| *i == idx) {
+                    debug!(upstream = %server.address_str, affinity_key = %key, "Selected upstream by affinity");
+                    return Ok(((*server).clone(), idx));
+                }
+            }
+
+            // Fall back to hashing the key
+            let hash = hash_string(key);
+            let idx = hash % healthy.len();
+            let (original_idx, server) = healthy[idx];
+            debug!(upstream = %server.address_str, affinity_key = %key, "Selected upstream by hash");
+            return Ok((server.clone(), original_idx));
+        }
+
+        // No affinity key, use normal selection
+        let server = self.select()?;
+        let idx = self.servers.iter().position(|s| Arc::ptr_eq(s, &server)).unwrap_or(0);
+        Ok((server, idx))
+    }
+}
+
+fn hash_string(s: &str) -> usize {
+    use std::hash::{Hash, Hasher};
+    use std::collections::hash_map::DefaultHasher;
+    let mut hasher = DefaultHasher::new();
+    s.hash(&mut hasher);
+    hasher.finish() as usize
 }
 
 fn rand_usize() -> usize {

@@ -1,11 +1,15 @@
 //! Main proxy implementation using Pingora's ProxyHttp trait
 
 use crate::access_log::{AccessLogEntry, AccessLogger, LogFormat};
+use crate::auth::{AuthResult, CompiledAuth};
+use crate::cache::{CacheConfig, CacheKey, CachedResponse, ResponseCache};
 use crate::compression::{
     CompressionConfig, CompressionEncoding, is_already_compressed,
     select_encoding, should_compress_content_type, compress,
 };
 use crate::file_server::FileServer;
+use crate::rewrite::CompiledRewrite;
+use crate::rhai_rewrite::{RhaiRewriteEngine, RequestContext as RhaiRequestContext};
 use crate::route::RoutingContext;
 use crate::upstream::UpstreamServer;
 use async_trait::async_trait;
@@ -21,6 +25,15 @@ use pingora_proxy::{ProxyHttp, Session};
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, info, warn};
+
+#[cfg(feature = "plugins")]
+use crate::plugin_integration::{
+    PluginState, SyncHookRunner, HookResult,
+    to_plugin_request, to_plugin_response, to_upstream_info,
+    from_plugin_request, from_plugin_response,
+};
+#[cfg(feature = "plugins")]
+use caddy_plugin::PluginContext;
 
 use crate::error::ProxyError;
 
@@ -44,6 +57,25 @@ pub struct RequestCtx {
     pub response_content_type: Option<String>,
     /// Whether the response is already compressed
     pub response_already_compressed: bool,
+    /// Session affinity cookie to set on response (name, value, max_age)
+    pub affinity_cookie: Option<(String, String, u64)>,
+    /// Cache key for caching responses
+    pub cache_key: Option<CacheKey>,
+    /// Whether this response should be cached
+    pub should_cache: bool,
+    /// Response status for caching
+    pub response_status: u16,
+    /// Response headers for caching
+    pub response_headers: Vec<(String, String)>,
+    /// Compiled rewrite rules for this request
+    pub rewrite: Option<Arc<CompiledRewrite>>,
+    /// Compiled Rhai rewrite engine for this request
+    pub rhai_rewrite: Option<Arc<RhaiRewriteEngine>>,
+    /// Compiled auth rules for this request
+    pub auth: Option<Arc<CompiledAuth>>,
+    /// Plugin context for this request (when plugins feature is enabled)
+    #[cfg(feature = "plugins")]
+    pub plugin_ctx: PluginContext,
 }
 
 #[derive(Clone)]
@@ -71,6 +103,16 @@ impl RequestCtx {
             response_body_buffer: Vec::new(),
             response_content_type: None,
             response_already_compressed: false,
+            affinity_cookie: None,
+            cache_key: None,
+            should_cache: false,
+            response_status: 0,
+            response_headers: Vec::new(),
+            rewrite: None,
+            rhai_rewrite: None,
+            auth: None,
+            #[cfg(feature = "plugins")]
+            plugin_ctx: PluginContext::default(),
         }
     }
 }
@@ -88,6 +130,10 @@ pub struct CaddyProxy {
     config: Arc<RwLock<Config>>,
     access_logger: Option<AccessLogger>,
     compression_config: CompressionConfig,
+    cache: Option<ResponseCache>,
+    /// Plugin state (when plugins feature is enabled)
+    #[cfg(feature = "plugins")]
+    plugin_state: Option<PluginState>,
 }
 
 impl CaddyProxy {
@@ -142,13 +188,51 @@ impl CaddyProxy {
             );
         }
 
+        // Initialize response cache if configured
+        let cache_opts = &config.global.cache;
+        let cache = if cache_opts.enabled {
+            let cache_config = CacheConfig {
+                enabled: true,
+                default_ttl: cache_opts.default_ttl,
+                max_entry_size: cache_opts.max_entry_size,
+                max_cache_size: cache_opts.max_cache_size,
+                cacheable_status: cache_opts.cacheable_status.clone(),
+                cacheable_methods: cache_opts.cacheable_methods.clone(),
+            };
+            info!(
+                default_ttl = cache_opts.default_ttl,
+                max_entry_size = cache_opts.max_entry_size,
+                max_cache_size = cache_opts.max_cache_size,
+                "Response caching enabled"
+            );
+            Some(ResponseCache::new(cache_config))
+        } else {
+            None
+        };
+
         Ok(Self {
             routing,
             acme_tokens,
             config: Arc::new(RwLock::new(config)),
             access_logger,
             compression_config,
+            cache,
+            #[cfg(feature = "plugins")]
+            plugin_state: None,
         })
+    }
+
+    /// Set the plugin state for this proxy
+    #[cfg(feature = "plugins")]
+    pub fn with_plugin_state(mut self, state: PluginState) -> Self {
+        self.plugin_state = Some(state);
+        self
+    }
+
+    /// Get a reference to the plugin state
+    #[cfg(feature = "plugins")]
+    pub fn plugin_state(&self) -> Option<&PluginState> {
+        self.plugin_state.as_ref()
     }
 
     pub fn reload_config(&self, config: Config) -> Result<(), ProxyError> {
@@ -194,6 +278,9 @@ impl Clone for CaddyProxy {
             config: self.config.clone(),
             access_logger: self.access_logger.clone(),
             compression_config: self.compression_config.clone(),
+            cache: self.cache.clone(),
+            #[cfg(feature = "plugins")]
+            plugin_state: self.plugin_state.clone(),
         }
     }
 }
@@ -243,6 +330,18 @@ impl ProxyHttp for CaddyProxy {
             .and_then(|v| v.to_str().ok());
         ctx.compression_encoding = select_encoding(accept_encoding, &self.compression_config);
 
+        // Build cache key if caching is enabled
+        if self.cache.is_some() && !ctx.is_websocket {
+            let host = headers
+                .get("host")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            let method = session.req_header().method.as_str();
+            let query = session.req_header().uri.query();
+
+            ctx.cache_key = Some(CacheKey::new(method, host, path, query));
+        }
+
         Ok(())
     }
 
@@ -259,6 +358,27 @@ impl ProxyHttp for CaddyProxy {
             session.write_response_body(Some(response.clone().into()), true).await?;
 
             return Ok(true);
+        }
+
+        // Check cache before proxying
+        if let (Some(cache), Some(cache_key)) = (&self.cache, &ctx.cache_key) {
+            if let Some(cached) = cache.get(cache_key) {
+                debug!(key = %cache_key.to_string_key(), "Serving from cache");
+
+                let status = cached.status;
+                let mut header = ResponseHeader::build(status, None)?;
+
+                for (name, value) in cached.headers.clone() {
+                    header.insert_header(name, value)?;
+                }
+                header.insert_header("X-Cache", "HIT")?;
+                header.insert_header("Content-Length", cached.body.len().to_string())?;
+
+                session.write_response_header(Box::new(header), false).await?;
+                session.write_response_body(Some(cached.body.clone()), true).await?;
+
+                return Ok(true);
+            }
         }
 
         let host = self.get_host(session);
@@ -289,10 +409,93 @@ impl ProxyHttp for CaddyProxy {
                 match &route.handler {
                     HandlerConfig::ReverseProxy(proxy_config) => {
                         if let Some(upstream_selector) = &route.upstream {
-                            match upstream_selector.select() {
+                            // Handle session affinity if configured
+                            let (upstream, affinity_cookie) = if let Some(affinity_config) = &proxy_config.session_affinity {
+                                // Get affinity key based on type
+                                let affinity_key = match affinity_config.affinity_type.as_str() {
+                                    "cookie" => {
+                                        // Extract cookie value from request
+                                        session.req_header().headers
+                                            .get("cookie")
+                                            .and_then(|v| v.to_str().ok())
+                                            .and_then(|cookies| {
+                                                cookies.split(';')
+                                                    .map(|c| c.trim())
+                                                    .find(|c| c.starts_with(&format!("{}=", affinity_config.cookie_name)))
+                                                    .and_then(|c| c.split('=').nth(1))
+                                                    .map(|v| v.to_string())
+                                            })
+                                    }
+                                    "ip_hash" => {
+                                        // Use client IP as affinity key
+                                        session.client_addr()
+                                            .map(|a| {
+                                                let s = a.to_string();
+                                                s.split(':').next().unwrap_or(&s).to_string()
+                                            })
+                                    }
+                                    _ => None,
+                                };
+
+                                match upstream_selector.select_with_affinity(affinity_key.as_deref()) {
+                                    Ok((server, idx)) => {
+                                        // Only set cookie if using cookie affinity
+                                        let cookie = if affinity_config.affinity_type == "cookie" {
+                                            Some((
+                                                affinity_config.cookie_name.clone(),
+                                                idx.to_string(),
+                                                affinity_config.cookie_max_age,
+                                            ))
+                                        } else {
+                                            None
+                                        };
+                                        (Ok(server), cookie)
+                                    }
+                                    Err(e) => (Err(e), None),
+                                }
+                            } else {
+                                // No affinity, use normal selection
+                                (upstream_selector.select(), None)
+                            };
+
+                            match upstream {
                                 Ok(upstream) => {
                                     ctx.handler_type = Some(HandlerType::ReverseProxy);
                                     ctx.upstream = Some(upstream);
+                                    ctx.affinity_cookie = affinity_cookie;
+                                    ctx.rewrite = route.rewrite.clone();
+                                    ctx.rhai_rewrite = route.rhai_rewrite.clone();
+                                    ctx.auth = route.auth.clone();
+
+                                    // Check authentication if configured
+                                    if let Some(auth) = &ctx.auth {
+                                        // Extract auth info from request
+                                        let headers = &session.req_header().headers;
+                                        let auth_header = headers
+                                            .get("authorization")
+                                            .and_then(|v| v.to_str().ok());
+                                        let api_key_header = headers
+                                            .get("x-api-key")
+                                            .and_then(|v| v.to_str().ok());
+                                        let query = session.req_header().uri.query();
+
+                                        let result = auth.authenticate(auth_header, api_key_header, query, path);
+
+                                        match result {
+                                            AuthResult::Authenticated { identity } => {
+                                                if let Some(id) = identity {
+                                                    debug!(identity = %id, "Request authenticated");
+                                                }
+                                            }
+                                            AuthResult::Denied { reason, request_auth, realm } => {
+                                                warn!(reason = %reason, path = %path, "Authentication denied");
+                                                return self.send_auth_response(session, request_auth, realm.as_deref()).await;
+                                            }
+                                            AuthResult::NotRequired => {
+                                                // Path is excluded from auth, continue
+                                            }
+                                        }
+                                    }
 
                                     for (key, value) in &proxy_config.headers_down {
                                         ctx.custom_headers_down.push((key.clone(), value.clone()));
@@ -398,6 +601,130 @@ impl ProxyHttp for CaddyProxy {
         upstream_request: &mut RequestHeader,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
+        // Apply path rewriting if configured
+        if let Some(rewrite) = &ctx.rewrite {
+            if rewrite.has_path_rewrite() {
+                let original_uri = upstream_request.uri.to_string();
+                let new_uri = crate::rewrite::rewrite_uri(&original_uri, rewrite);
+
+                if new_uri != original_uri {
+                    debug!(original = %original_uri, new = %new_uri, "Rewriting request URI");
+                    if let Ok(uri) = new_uri.parse() {
+                        upstream_request.set_uri(uri);
+                    }
+                }
+            }
+
+            // Apply request header additions (won't override existing)
+            for (name, value) in &rewrite.request_headers_add {
+                if !upstream_request.headers.contains_key(name.as_str()) {
+                    upstream_request.insert_header(name.clone(), value.clone())?;
+                }
+            }
+
+            // Apply request header sets (will override)
+            for (name, value) in &rewrite.request_headers_set {
+                upstream_request.insert_header(name.clone(), value.clone())?;
+            }
+
+            // Apply request header deletions
+            for name in &rewrite.request_headers_delete {
+                upstream_request.remove_header(name);
+            }
+        }
+
+        // Apply Rhai rewrite rules if configured
+        if let Some(rhai_engine) = &ctx.rhai_rewrite {
+            // Build request context for Rhai evaluation
+            let uri = upstream_request.uri.to_string();
+            let (path, query) = match uri.find('?') {
+                Some(idx) => (uri[..idx].to_string(), uri[idx + 1..].to_string()),
+                None => (uri.clone(), String::new()),
+            };
+
+            // Parse query string into params
+            let query_params: std::collections::HashMap<String, String> = query
+                .split('&')
+                .filter(|p| !p.is_empty())
+                .filter_map(|p| {
+                    let mut parts = p.splitn(2, '=');
+                    Some((parts.next()?.to_string(), parts.next().unwrap_or("").to_string()))
+                })
+                .collect();
+
+            // Collect headers
+            let headers: std::collections::HashMap<String, String> = upstream_request
+                .headers
+                .iter()
+                .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+                .collect();
+
+            let client_ip = session.client_addr().map(|a| {
+                let s = a.to_string();
+                s.split(':').next().unwrap_or(&s).to_string()
+            });
+
+            let rhai_ctx = RhaiRequestContext {
+                method: upstream_request.method.as_str().to_string(),
+                path,
+                query,
+                host: self.get_host(session).map(|s| s.to_string()),
+                client_ip,
+                headers,
+                query_params,
+            };
+
+            // Process all rules
+            match rhai_engine.process(&rhai_ctx) {
+                Ok(result) => {
+                    // Apply path rewrite from Rhai
+                    if let Some(new_path) = &result.path {
+                        let new_uri = if let Some(new_query) = &result.query {
+                            if new_query.is_empty() {
+                                new_path.clone()
+                            } else {
+                                format!("{}?{}", new_path, new_query)
+                            }
+                        } else if !rhai_ctx.query_params.is_empty() {
+                            format!("{}?{}", new_path, rhai_ctx.query_params.iter()
+                                .map(|(k, v)| format!("{}={}", k, v))
+                                .collect::<Vec<_>>()
+                                .join("&"))
+                        } else {
+                            new_path.clone()
+                        };
+
+                        debug!(original = %uri, new = %new_uri, "Rhai path rewrite");
+                        if let Ok(parsed_uri) = new_uri.parse() {
+                            upstream_request.set_uri(parsed_uri);
+                        }
+                    }
+
+                    // Apply header additions
+                    for (name, value) in &result.headers_add {
+                        if !upstream_request.headers.contains_key(name.as_str()) {
+                            let _ = upstream_request.insert_header(name.clone(), value.clone());
+                        }
+                    }
+
+                    // Apply header sets
+                    for (name, value) in &result.headers_set {
+                        let _ = upstream_request.insert_header(name.clone(), value.clone());
+                    }
+
+                    // Apply header deletions
+                    for name in &result.headers_delete {
+                        upstream_request.remove_header(name);
+                    }
+
+                    debug!("Applied Rhai rewrite rules");
+                }
+                Err(e) => {
+                    warn!(error = %e, "Rhai rewrite evaluation failed");
+                }
+            }
+        }
+
         // Add X-Forwarded-For and X-Real-IP
         if let Some(client_addr) = session.client_addr() {
             let client_ip = client_addr.to_string();
@@ -464,6 +791,41 @@ impl ProxyHttp for CaddyProxy {
 
         upstream_response.insert_header("Server", "caddy-rs")?;
 
+        // Set session affinity cookie if needed
+        if let Some((name, value, max_age)) = &ctx.affinity_cookie {
+            let cookie = if *max_age > 0 {
+                format!("{}={}; Path=/; Max-Age={}; HttpOnly", name, value, max_age)
+            } else {
+                format!("{}={}; Path=/; HttpOnly", name, value)
+            };
+            upstream_response.insert_header("Set-Cookie", cookie)?;
+            debug!(cookie_name = %name, server_idx = %value, "Set session affinity cookie");
+        }
+
+        // Apply response header rewrites if configured
+        if let Some(rewrite) = &ctx.rewrite {
+            if rewrite.has_response_header_rewrite() {
+                // Apply response header additions (won't override existing)
+                for (name, value) in &rewrite.response_headers_add {
+                    if !upstream_response.headers.contains_key(name.as_str()) {
+                        upstream_response.insert_header(name.clone(), value.clone())?;
+                    }
+                }
+
+                // Apply response header sets (will override)
+                for (name, value) in &rewrite.response_headers_set {
+                    upstream_response.insert_header(name.clone(), value.clone())?;
+                }
+
+                // Apply response header deletions
+                for name in &rewrite.response_headers_delete {
+                    upstream_response.remove_header(name);
+                }
+
+                debug!("Applied response header rewrites");
+            }
+        }
+
         // Check content type for compression eligibility
         let content_type = upstream_response.headers
             .get("content-type")
@@ -476,6 +838,36 @@ impl ProxyHttp for CaddyProxy {
             .get("content-encoding")
             .and_then(|v| v.to_str().ok());
         ctx.response_already_compressed = is_already_compressed(content_encoding);
+
+        // Store response status for caching
+        ctx.response_status = upstream_response.status.as_u16();
+
+        // Check if response is cacheable and store headers
+        if let (Some(cache), Some(cache_key)) = (&self.cache, &ctx.cache_key) {
+            // Collect response headers for caching (excluding hop-by-hop headers)
+            let cacheable_headers: Vec<(String, String)> = upstream_response.headers
+                .iter()
+                .filter(|(name, _)| {
+                    let n = name.as_str().to_lowercase();
+                    !["connection", "keep-alive", "transfer-encoding", "te",
+                      "trailer", "proxy-authorization", "proxy-authenticate",
+                      "upgrade", "content-length"].contains(&n.as_str())
+                })
+                .map(|(name, value)| {
+                    (name.as_str().to_string(), value.to_str().unwrap_or("").to_string())
+                })
+                .collect();
+
+            ctx.response_headers = cacheable_headers.clone();
+
+            // Check if we should cache this response
+            let method = cache_key.method.as_str();
+            if cache.is_cacheable(method, ctx.response_status, &cacheable_headers) {
+                ctx.should_cache = true;
+                upstream_response.insert_header("X-Cache", "MISS")?;
+                debug!(key = %cache_key.to_string_key(), status = ctx.response_status, "Response will be cached");
+            }
+        }
 
         // Determine if we should compress this response
         let should_compress = ctx.compression_encoding != CompressionEncoding::Identity
@@ -511,13 +903,16 @@ impl ProxyHttp for CaddyProxy {
     where
         Self::CTX: Send + Sync,
     {
-        // Skip compression for WebSocket, already compressed, or non-compressible content
+        // Determine if we need compression
         let should_compress = ctx.compression_encoding != CompressionEncoding::Identity
             && !ctx.response_already_compressed
             && !ctx.is_websocket
             && should_compress_content_type(ctx.response_content_type.as_deref());
 
-        if !should_compress {
+        // We need to buffer if we're compressing OR caching
+        let should_buffer = should_compress || ctx.should_cache;
+
+        if !should_buffer {
             return Ok(None);
         }
 
@@ -526,29 +921,64 @@ impl ProxyHttp for CaddyProxy {
             ctx.response_body_buffer.extend_from_slice(&b);
         }
 
-        // Only compress when we have the complete response
+        // Process when we have the complete response
         if end_of_stream && !ctx.response_body_buffer.is_empty() {
-            // Skip if body is too small
-            if ctx.response_body_buffer.len() < self.compression_config.min_size {
-                *body = Some(Bytes::copy_from_slice(&ctx.response_body_buffer));
-                return Ok(None);
+            // Store in cache if caching is enabled (always cache uncompressed body)
+            if ctx.should_cache {
+                if let (Some(cache), Some(cache_key)) = (&self.cache, &ctx.cache_key) {
+                    let ttl = cache.parse_ttl(&ctx.response_headers);
+
+                    let cached_response = CachedResponse {
+                        status: StatusCode::from_u16(ctx.response_status).unwrap_or(StatusCode::OK),
+                        headers: ctx.response_headers.clone(),
+                        body: Bytes::copy_from_slice(&ctx.response_body_buffer),
+                        cached_at: Instant::now(),
+                        ttl,
+                        etag: ctx.response_headers.iter()
+                            .find(|(k, _)| k.eq_ignore_ascii_case("etag"))
+                            .map(|(_, v)| v.clone()),
+                        last_modified: ctx.response_headers.iter()
+                            .find(|(k, _)| k.eq_ignore_ascii_case("last-modified"))
+                            .map(|(_, v)| v.clone()),
+                    };
+
+                    cache.put(cache_key, cached_response);
+                    debug!(
+                        key = %cache_key.to_string_key(),
+                        size = ctx.response_body_buffer.len(),
+                        ttl = ?ttl,
+                        "Response cached"
+                    );
+                }
             }
 
-            // Compress the body
-            match compress(&ctx.response_body_buffer, ctx.compression_encoding, self.compression_config.level) {
-                Ok(compressed) => {
-                    debug!(
-                        original_size = ctx.response_body_buffer.len(),
-                        compressed_size = compressed.len(),
-                        encoding = %ctx.compression_encoding.header_value(),
-                        "Response compressed"
-                    );
-                    *body = Some(compressed);
-                }
-                Err(e) => {
-                    warn!(error = %e, "Compression failed, sending uncompressed");
+            // Apply compression if needed
+            if should_compress {
+                // Skip compression if body is too small
+                if ctx.response_body_buffer.len() < self.compression_config.min_size {
                     *body = Some(Bytes::copy_from_slice(&ctx.response_body_buffer));
+                    return Ok(None);
                 }
+
+                // Compress the body
+                match compress(&ctx.response_body_buffer, ctx.compression_encoding, self.compression_config.level) {
+                    Ok(compressed) => {
+                        debug!(
+                            original_size = ctx.response_body_buffer.len(),
+                            compressed_size = compressed.len(),
+                            encoding = %ctx.compression_encoding.header_value(),
+                            "Response compressed"
+                        );
+                        *body = Some(compressed);
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "Compression failed, sending uncompressed");
+                        *body = Some(Bytes::copy_from_slice(&ctx.response_body_buffer));
+                    }
+                }
+            } else {
+                // Just pass through the buffered body (caching without compression)
+                *body = Some(Bytes::copy_from_slice(&ctx.response_body_buffer));
             }
         }
 
@@ -631,6 +1061,30 @@ impl CaddyProxy {
         header.insert_header("Content-Type", "text/plain")?;
         header.insert_header("Content-Length", body.len().to_string())?;
         header.insert_header("Server", "caddy-rs")?;
+
+        session.write_response_header(Box::new(header), false).await?;
+        session.write_response_body(Some(body.into()), true).await?;
+
+        Ok(true)
+    }
+
+    async fn send_auth_response(&self, session: &mut Session, request_auth: bool, realm: Option<&str>) -> Result<bool> {
+        let (status_code, body) = if request_auth {
+            (StatusCode::UNAUTHORIZED, "401 Unauthorized")
+        } else {
+            (StatusCode::FORBIDDEN, "403 Forbidden")
+        };
+
+        let mut header = ResponseHeader::build(status_code, None)?;
+        header.insert_header("Content-Type", "text/plain")?;
+        header.insert_header("Content-Length", body.len().to_string())?;
+        header.insert_header("Server", "caddy-rs")?;
+
+        // Add WWW-Authenticate header for 401 responses (Basic auth challenge)
+        if request_auth {
+            let realm_value = realm.unwrap_or("Restricted");
+            header.insert_header("WWW-Authenticate", format!("Basic realm=\"{}\"", realm_value))?;
+        }
 
         session.write_response_header(Box::new(header), false).await?;
         session.write_response_body(Some(body.into()), true).await?;

@@ -1,37 +1,118 @@
 //! Route matching and routing table
 
+use crate::auth::CompiledAuth;
 use crate::error::Result;
+use crate::rewrite::CompiledRewrite;
+use crate::rhai_rewrite::{RhaiRewriteConfig, RhaiRewriteEngine};
 use crate::upstream::UpstreamSelector;
 use caddy_core::{HandlerConfig, MatchConfig, RouteConfig, ServerConfig};
 use parking_lot::RwLock;
 use std::sync::Arc;
-use tracing::debug;
+use tracing::{debug, warn};
 
 /// A compiled route ready for matching
 pub struct CompiledRoute {
     pub matcher: MatchConfig,
     pub handler: HandlerConfig,
     pub upstream: Option<Arc<UpstreamSelector>>,
+    pub rewrite: Option<Arc<CompiledRewrite>>,
+    pub rhai_rewrite: Option<Arc<RhaiRewriteEngine>>,
+    pub auth: Option<Arc<CompiledAuth>>,
 }
 
 impl CompiledRoute {
     pub fn from_config(config: &RouteConfig) -> Result<Self> {
-        let upstream = match &config.handle {
+        let (upstream, rewrite, rhai_rewrite, auth) = match &config.handle {
             HandlerConfig::ReverseProxy(proxy_config) => {
                 let selector = UpstreamSelector::new(
                     &proxy_config.upstreams,
                     proxy_config.load_balancing.clone(),
                     proxy_config.upstream_tls,
                 )?;
-                Some(Arc::new(selector))
+
+                // Compile rewrite rules if configured
+                let compiled_rewrite = if let Some(ref rewrite_config) = proxy_config.rewrite {
+                    match CompiledRewrite::from_config(rewrite_config) {
+                        Ok(r) => {
+                            debug!(
+                                strip_prefix = ?rewrite_config.strip_path_prefix,
+                                add_prefix = ?rewrite_config.add_path_prefix,
+                                "Compiled rewrite rules"
+                            );
+                            Some(Arc::new(r))
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "Failed to compile rewrite rules, skipping");
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                // Compile Rhai rewrite rules if configured
+                let compiled_rhai_rewrite = if let Some(ref rewrite_config) = proxy_config.rewrite {
+                    if !rewrite_config.rhai_rules.is_empty() {
+                        let rhai_configs: Vec<RhaiRewriteConfig> = rewrite_config.rhai_rules.iter().map(|r| {
+                            RhaiRewriteConfig {
+                                when: r.when.clone(),
+                                path: r.path.clone(),
+                                query: r.query.clone(),
+                                headers_set: r.headers_set.clone(),
+                                headers_add: r.headers_add.clone(),
+                                headers_delete: r.headers_delete.clone(),
+                                action: r.action.clone(),
+                                redirect_location: r.redirect_location.clone(),
+                                redirect_status: r.redirect_status,
+                                reject_status: r.reject_status,
+                                reject_body: r.reject_body.clone(),
+                                stop: r.stop,
+                                script: r.script.clone(),
+                            }
+                        }).collect();
+
+                        match RhaiRewriteEngine::new(rhai_configs) {
+                            Ok(engine) => {
+                                debug!(rules = rewrite_config.rhai_rules.len(), "Compiled Rhai rewrite rules");
+                                Some(Arc::new(engine))
+                            }
+                            Err(e) => {
+                                warn!(error = %e, "Failed to compile Rhai rewrite rules, skipping");
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                // Compile auth rules if configured
+                let compiled_auth = if let Some(ref auth_config) = proxy_config.auth {
+                    let auth = CompiledAuth::from_config(auth_config);
+                    if auth.has_auth() {
+                        debug!("Compiled auth rules for route");
+                        Some(Arc::new(auth))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                (Some(Arc::new(selector)), compiled_rewrite, compiled_rhai_rewrite, compiled_auth)
             }
-            _ => None,
+            _ => (None, None, None, None),
         };
 
         Ok(Self {
             matcher: config.match_rule.clone(),
             handler: config.handle.clone(),
             upstream,
+            rewrite,
+            rhai_rewrite,
+            auth,
         })
     }
 
@@ -156,6 +237,9 @@ mod tests {
                     headers_down: Default::default(),
                     timeout: 30,
                     upstream_tls: false,
+                    session_affinity: None,
+                    rewrite: None,
+                    auth: None,
                 }),
             }],
             https_redirect: false,
@@ -362,6 +446,9 @@ mod tests {
                 headers_down: HashMap::new(),
                 timeout: 30,
                 upstream_tls: false,
+                session_affinity: None,
+                rewrite: None,
+                auth: None,
             }),
         };
 

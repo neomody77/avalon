@@ -29,6 +29,10 @@ pub struct Config {
     #[serde(default)]
     pub tls: TlsConfig,
 
+    /// Plugin configuration
+    #[serde(default)]
+    pub plugins: PluginsConfig,
+
     /// Server configurations
     #[serde(default)]
     pub servers: Vec<ServerConfig>,
@@ -114,7 +118,141 @@ impl Default for Config {
         Self {
             global: GlobalConfig::default(),
             tls: TlsConfig::default(),
+            plugins: PluginsConfig::default(),
             servers: Vec::new(),
+        }
+    }
+}
+
+/// Plugin system configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginsConfig {
+    /// Enable the plugin system
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Directory to search for dynamic plugins
+    #[serde(default = "default_plugin_dir")]
+    pub plugin_dir: PathBuf,
+
+    /// List of plugins to load
+    #[serde(default)]
+    pub plugins: Vec<PluginEntry>,
+
+    /// WASM plugin configuration
+    #[serde(default)]
+    pub wasm: WasmPluginConfig,
+}
+
+fn default_plugin_dir() -> PathBuf {
+    PathBuf::from("./plugins")
+}
+
+impl Default for PluginsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            plugin_dir: default_plugin_dir(),
+            plugins: Vec::new(),
+            wasm: WasmPluginConfig::default(),
+        }
+    }
+}
+
+/// Individual plugin entry configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginEntry {
+    /// Plugin name (unique identifier)
+    pub name: String,
+
+    /// Plugin type: "static", "dynamic", or "wasm"
+    #[serde(default = "default_plugin_type")]
+    pub plugin_type: PluginType,
+
+    /// Path to the plugin file (for dynamic/wasm plugins)
+    #[serde(default)]
+    pub path: Option<PathBuf>,
+
+    /// Whether the plugin is enabled
+    #[serde(default = "default_plugin_enabled")]
+    pub enabled: bool,
+
+    /// Plugin-specific configuration (passed to plugin init)
+    #[serde(default)]
+    pub config: HashMap<String, toml::Value>,
+}
+
+fn default_plugin_type() -> PluginType {
+    PluginType::Static
+}
+
+fn default_plugin_enabled() -> bool {
+    true
+}
+
+/// Plugin type enumeration
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginType {
+    /// Statically compiled plugin (built into binary)
+    Static,
+    /// Dynamically loaded native plugin (.so/.dylib/.dll)
+    Dynamic,
+    /// WebAssembly plugin (.wasm)
+    Wasm,
+}
+
+impl Default for PluginType {
+    fn default() -> Self {
+        PluginType::Static
+    }
+}
+
+/// WASM plugin runtime configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WasmPluginConfig {
+    /// Enable WASM plugin support
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Memory limit per WASM instance in bytes (default: 16MB)
+    #[serde(default = "default_wasm_memory_limit")]
+    pub memory_limit: usize,
+
+    /// Fuel limit for WASM execution (prevents infinite loops, 0 = unlimited)
+    #[serde(default = "default_wasm_fuel_limit")]
+    pub fuel_limit: u64,
+
+    /// Allow WASM plugins to access network
+    #[serde(default)]
+    pub allow_network: bool,
+
+    /// Allow WASM plugins to read filesystem
+    #[serde(default)]
+    pub allow_fs_read: bool,
+
+    /// Allowed filesystem paths for WASM plugins
+    #[serde(default)]
+    pub allowed_paths: Vec<PathBuf>,
+}
+
+fn default_wasm_memory_limit() -> usize {
+    16 * 1024 * 1024 // 16MB
+}
+
+fn default_wasm_fuel_limit() -> u64 {
+    1_000_000_000 // 1 billion instructions
+}
+
+impl Default for WasmPluginConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            memory_limit: default_wasm_memory_limit(),
+            fuel_limit: default_wasm_fuel_limit(),
+            allow_network: false,
+            allow_fs_read: false,
+            allowed_paths: Vec::new(),
         }
     }
 }
@@ -141,6 +279,10 @@ pub struct GlobalConfig {
     /// Compression configuration
     #[serde(default)]
     pub compression: CompressionOptions,
+
+    /// Response caching configuration
+    #[serde(default)]
+    pub cache: CacheOptions,
 }
 
 /// Compression configuration options
@@ -165,6 +307,67 @@ pub struct CompressionOptions {
     /// Compression level: 1-9 for gzip, 0-11 for brotli (default: 6)
     #[serde(default = "default_compression_level")]
     pub level: u32,
+}
+
+/// Response caching configuration options
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CacheOptions {
+    /// Enable response caching (default: false)
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Default TTL for cached responses in seconds (default: 300)
+    #[serde(default = "default_cache_ttl")]
+    pub default_ttl: u64,
+
+    /// Maximum cache entry size in bytes (default: 10MB)
+    #[serde(default = "default_cache_max_entry_size")]
+    pub max_entry_size: usize,
+
+    /// Maximum total cache size in bytes (default: 100MB)
+    #[serde(default = "default_cache_max_size")]
+    pub max_cache_size: usize,
+
+    /// Cacheable status codes (default: [200, 301, 302, 304, 307, 308])
+    #[serde(default = "default_cacheable_status")]
+    pub cacheable_status: Vec<u16>,
+
+    /// Cacheable HTTP methods (default: ["GET", "HEAD"])
+    #[serde(default = "default_cacheable_methods")]
+    pub cacheable_methods: Vec<String>,
+}
+
+fn default_cache_ttl() -> u64 {
+    300
+}
+
+fn default_cache_max_entry_size() -> usize {
+    10 * 1024 * 1024 // 10MB
+}
+
+fn default_cache_max_size() -> usize {
+    100 * 1024 * 1024 // 100MB
+}
+
+fn default_cacheable_status() -> Vec<u16> {
+    vec![200, 301, 302, 304, 307, 308]
+}
+
+fn default_cacheable_methods() -> Vec<String> {
+    vec!["GET".to_string(), "HEAD".to_string()]
+}
+
+impl Default for CacheOptions {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            default_ttl: default_cache_ttl(),
+            max_entry_size: default_cache_max_entry_size(),
+            max_cache_size: default_cache_max_size(),
+            cacheable_status: default_cacheable_status(),
+            cacheable_methods: default_cacheable_methods(),
+        }
+    }
 }
 
 fn default_compression_enabled() -> bool {
@@ -211,6 +414,7 @@ impl Default for GlobalConfig {
             access_log: None,
             access_log_format: default_log_format(),
             compression: CompressionOptions::default(),
+            cache: CacheOptions::default(),
         }
     }
 }
@@ -395,6 +599,249 @@ pub struct ReverseProxyConfig {
     /// Use TLS for upstream connections
     #[serde(default)]
     pub upstream_tls: bool,
+
+    /// Session affinity (sticky sessions) configuration
+    pub session_affinity: Option<SessionAffinityConfig>,
+
+    /// Request rewrite configuration
+    #[serde(default)]
+    pub rewrite: Option<RewriteConfig>,
+
+    /// Authentication configuration
+    #[serde(default)]
+    pub auth: Option<AuthConfig>,
+}
+
+/// Authentication configuration
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AuthConfig {
+    /// Basic authentication credentials
+    #[serde(default)]
+    pub basic: Vec<BasicAuthCredential>,
+
+    /// API key authentication
+    #[serde(default)]
+    pub api_keys: Vec<ApiKeyConfig>,
+
+    /// JWT authentication configuration
+    #[serde(default)]
+    pub jwt: Option<JwtAuthConfig>,
+
+    /// Custom realm for authentication challenges
+    #[serde(default = "default_auth_realm")]
+    pub realm: String,
+
+    /// Paths to exclude from authentication (e.g., health checks)
+    #[serde(default)]
+    pub exclude_paths: Vec<String>,
+}
+
+fn default_auth_realm() -> String {
+    "Restricted".to_string()
+}
+
+/// Basic authentication credential
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BasicAuthCredential {
+    /// Username
+    pub username: String,
+
+    /// Password (plain text or bcrypt hash with "$2" prefix)
+    pub password: String,
+}
+
+/// API key configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiKeyConfig {
+    /// The API key value
+    pub key: String,
+
+    /// Optional name/identifier for this key
+    #[serde(default)]
+    pub name: Option<String>,
+
+    /// Where to look for the key: "header" or "query"
+    #[serde(default = "default_api_key_source")]
+    pub source: String,
+
+    /// Header name or query parameter name (default: "X-API-Key" for header, "api_key" for query)
+    #[serde(default)]
+    pub param_name: Option<String>,
+}
+
+fn default_api_key_source() -> String {
+    "header".to_string()
+}
+
+/// JWT authentication configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JwtAuthConfig {
+    /// Secret key for HMAC algorithms (HS256, HS384, HS512)
+    #[serde(default)]
+    pub secret: Option<String>,
+
+    /// Algorithm to use (default: HS256)
+    #[serde(default = "default_jwt_algorithm")]
+    pub algorithm: String,
+
+    /// Header name to look for JWT (default: "Authorization")
+    #[serde(default = "default_jwt_header")]
+    pub header: String,
+
+    /// Expected issuer (optional)
+    #[serde(default)]
+    pub issuer: Option<String>,
+
+    /// Expected audience (optional)
+    #[serde(default)]
+    pub audience: Option<String>,
+}
+
+fn default_jwt_algorithm() -> String {
+    "HS256".to_string()
+}
+
+fn default_jwt_header() -> String {
+    "Authorization".to_string()
+}
+
+/// Request/response rewrite configuration
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RewriteConfig {
+    /// Strip path prefix (e.g., "/api" -> request to upstream without /api prefix)
+    #[serde(default)]
+    pub strip_path_prefix: Option<String>,
+
+    /// Add path prefix (e.g., add "/v1" prefix to upstream request)
+    #[serde(default)]
+    pub add_path_prefix: Option<String>,
+
+    /// Replace path using regex (pattern, replacement)
+    #[serde(default)]
+    pub path_regex: Option<PathRegex>,
+
+    /// Replace entire URI path
+    #[serde(default)]
+    pub replace_path: Option<String>,
+
+    /// Headers to add to the request (won't override existing)
+    #[serde(default)]
+    pub request_headers_add: HashMap<String, String>,
+
+    /// Headers to set on the request (will override existing)
+    #[serde(default)]
+    pub request_headers_set: HashMap<String, String>,
+
+    /// Headers to remove from the request
+    #[serde(default)]
+    pub request_headers_delete: Vec<String>,
+
+    /// Headers to add to the response (won't override existing)
+    #[serde(default)]
+    pub response_headers_add: HashMap<String, String>,
+
+    /// Headers to set on the response (will override existing)
+    #[serde(default)]
+    pub response_headers_set: HashMap<String, String>,
+
+    /// Headers to remove from the response
+    #[serde(default)]
+    pub response_headers_delete: Vec<String>,
+
+    /// Rhai scripting rewrite rules (advanced)
+    #[serde(default)]
+    pub rhai_rules: Vec<RhaiRewriteRuleConfig>,
+}
+
+/// Rhai-based rewrite rule configuration
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RhaiRewriteRuleConfig {
+    /// Condition expression (Rhai) - rule only applies when this evaluates to true
+    #[serde(default)]
+    pub when: Option<String>,
+
+    /// Path expression (Rhai) - new path value
+    #[serde(default)]
+    pub path: Option<String>,
+
+    /// Query expression (Rhai) - new query string
+    #[serde(default)]
+    pub query: Option<String>,
+
+    /// Headers to set (value is Rhai expression)
+    #[serde(default)]
+    pub headers_set: HashMap<String, String>,
+
+    /// Headers to add (value is Rhai expression)
+    #[serde(default)]
+    pub headers_add: HashMap<String, String>,
+
+    /// Headers to delete
+    #[serde(default)]
+    pub headers_delete: Vec<String>,
+
+    /// Action type: "continue", "redirect", "reject"
+    #[serde(default)]
+    pub action: Option<String>,
+
+    /// Redirect location (Rhai expression)
+    #[serde(default)]
+    pub redirect_location: Option<String>,
+
+    /// Redirect status code (default: 302)
+    #[serde(default)]
+    pub redirect_status: Option<u16>,
+
+    /// Reject status code (default: 403)
+    #[serde(default)]
+    pub reject_status: Option<u16>,
+
+    /// Reject body
+    #[serde(default)]
+    pub reject_body: Option<String>,
+
+    /// Stop processing further rules after this one matches (default: true)
+    #[serde(default)]
+    pub stop: Option<bool>,
+
+    /// Full Rhai script for imperative rewrite logic
+    /// When set, this script is executed and can directly modify the request object
+    #[serde(default)]
+    pub script: Option<String>,
+}
+
+/// Path regex replacement configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PathRegex {
+    /// Regex pattern to match
+    pub pattern: String,
+
+    /// Replacement string (can use $1, $2, etc. for capture groups)
+    pub replacement: String,
+}
+
+/// Session affinity configuration for sticky sessions
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionAffinityConfig {
+    /// Affinity type: "cookie" or "ip_hash"
+    #[serde(default = "default_affinity_type")]
+    pub affinity_type: String,
+
+    /// Cookie name for cookie-based affinity
+    #[serde(default = "default_affinity_cookie")]
+    pub cookie_name: String,
+
+    /// Cookie max age in seconds (0 = session cookie)
+    #[serde(default)]
+    pub cookie_max_age: u64,
+}
+
+fn default_affinity_type() -> String {
+    "cookie".to_string()
+}
+
+fn default_affinity_cookie() -> String {
+    "srv_id".to_string()
 }
 
 fn default_timeout() -> u64 {
@@ -623,6 +1070,9 @@ upstreams = ["127.0.0.1:9090"]
                         headers_down: HashMap::new(),
                         timeout: 30,
                         upstream_tls: false,
+                        session_affinity: None,
+                        rewrite: None,
+                        auth: None,
                     }),
                 }],
                 https_redirect: false,
@@ -895,5 +1345,95 @@ code = 301
         } else {
             panic!("Expected Redirect handler");
         }
+    }
+
+    #[test]
+    fn test_plugins_config_default() {
+        let plugins = PluginsConfig::default();
+        assert!(!plugins.enabled);
+        assert_eq!(plugins.plugin_dir, PathBuf::from("./plugins"));
+        assert!(plugins.plugins.is_empty());
+        assert!(!plugins.wasm.enabled);
+    }
+
+    #[test]
+    fn test_plugins_config_parse() {
+        let toml = r#"
+[tls]
+acme_enabled = false
+
+[plugins]
+enabled = true
+plugin_dir = "/opt/caddy-plugins"
+
+[[plugins.plugins]]
+name = "rate-limiter"
+plugin_type = "static"
+enabled = true
+
+[[plugins.plugins]]
+name = "custom-auth"
+plugin_type = "dynamic"
+path = "/opt/caddy-plugins/libauth.so"
+enabled = true
+
+[plugins.plugins.config]
+timeout = 30
+max_retries = 3
+
+[[plugins.plugins]]
+name = "wasm-filter"
+plugin_type = "wasm"
+path = "/opt/caddy-plugins/filter.wasm"
+
+[plugins.wasm]
+enabled = true
+memory_limit = 33554432
+fuel_limit = 2000000000
+allow_network = false
+"#;
+
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(config.plugins.enabled);
+        assert_eq!(config.plugins.plugin_dir, PathBuf::from("/opt/caddy-plugins"));
+        assert_eq!(config.plugins.plugins.len(), 3);
+
+        // Check static plugin
+        let static_plugin = &config.plugins.plugins[0];
+        assert_eq!(static_plugin.name, "rate-limiter");
+        assert_eq!(static_plugin.plugin_type, PluginType::Static);
+        assert!(static_plugin.enabled);
+
+        // Check dynamic plugin
+        let dynamic_plugin = &config.plugins.plugins[1];
+        assert_eq!(dynamic_plugin.name, "custom-auth");
+        assert_eq!(dynamic_plugin.plugin_type, PluginType::Dynamic);
+        assert_eq!(dynamic_plugin.path, Some(PathBuf::from("/opt/caddy-plugins/libauth.so")));
+
+        // Check WASM plugin
+        let wasm_plugin = &config.plugins.plugins[2];
+        assert_eq!(wasm_plugin.name, "wasm-filter");
+        assert_eq!(wasm_plugin.plugin_type, PluginType::Wasm);
+        assert_eq!(wasm_plugin.path, Some(PathBuf::from("/opt/caddy-plugins/filter.wasm")));
+
+        // Check WASM config
+        assert!(config.plugins.wasm.enabled);
+        assert_eq!(config.plugins.wasm.memory_limit, 33554432);
+        assert_eq!(config.plugins.wasm.fuel_limit, 2000000000);
+        assert!(!config.plugins.wasm.allow_network);
+    }
+
+    #[test]
+    fn test_plugin_type_serde() {
+        assert_eq!(PluginType::default(), PluginType::Static);
+
+        let json_static = serde_json::to_string(&PluginType::Static).unwrap();
+        assert_eq!(json_static, "\"static\"");
+
+        let json_dynamic = serde_json::to_string(&PluginType::Dynamic).unwrap();
+        assert_eq!(json_dynamic, "\"dynamic\"");
+
+        let json_wasm = serde_json::to_string(&PluginType::Wasm).unwrap();
+        assert_eq!(json_wasm, "\"wasm\"");
     }
 }
