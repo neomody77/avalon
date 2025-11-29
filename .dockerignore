@@ -1,0 +1,8 @@
+target/
+.git/
+*.log
+*.tmp
+.env
+certs/
+config/
+logs/

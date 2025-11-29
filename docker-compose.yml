@@ -1,0 +1,11 @@
+services:
+  caddy-rs:
+    build: .
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./certs:/app/certs
+      - ./config:/app/config
+      - ./logs:/var/log
+    restart: unless-stopped
