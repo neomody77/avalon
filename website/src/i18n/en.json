@@ -1,0 +1,82 @@
+{
+  "meta": {
+    "title": "Avalon - High-Performance Reverse Proxy",
+    "description": "A modern reverse proxy built with Rust and Cloudflare Pingora"
+  },
+  "nav": {
+    "features": "Features",
+    "docs": "Docs",
+    "github": "GitHub"
+  },
+  "docs": {
+    "nav": {
+      "title": "Documentation",
+      "getting-started": "Getting Started",
+      "configuration": "Configuration",
+      "examples": "Examples",
+      "rhai": "Rhai Scripting"
+    }
+  },
+  "hero": {
+    "title": "Avalon",
+    "subtitle": "High-Performance Reverse Proxy",
+    "description": "Powered by Cloudflare Pingora, Built with Rust",
+    "getStarted": "Get Started",
+    "viewDocs": "Documentation",
+    "viewGithub": "View on GitHub",
+    "badges": {
+      "https": "Automatic HTTPS",
+      "hotReload": "Hot Reload",
+      "rhai": "Rhai Scripting"
+    }
+  },
+  "features": {
+    "title": "Features",
+    "performance": {
+      "title": "Performance & Reliability",
+      "pingora": "Cloudflare Pingora Engine",
+      "rust": "Rust Memory Safety",
+      "hotReload": "Zero-Downtime Hot Reload",
+      "pool": "Connection Pooling & Reuse"
+    },
+    "security": {
+      "title": "Security",
+      "https": "Automatic HTTPS",
+      "httpsDesc": "Let's Encrypt, ZeroSSL, Google, Buypass",
+      "ipFilter": "IP Filtering (CIDR)",
+      "rateLimit": "Rate Limiting",
+      "auth": "Authentication",
+      "authDesc": "Basic, API Key, JWT"
+    },
+    "advanced": {
+      "title": "Advanced Features",
+      "loadBalance": "Load Balancing",
+      "loadBalanceDesc": "5+ Algorithms",
+      "cache": "Response Caching",
+      "compress": "Gzip/Brotli Compression",
+      "rhai": "Rhai Script Extension"
+    }
+  },
+  "comparison": {
+    "title": "Comparison",
+    "feature": "Feature",
+    "language": "Language",
+    "autoHttps": "Auto HTTPS",
+    "hotReload": "Hot Reload",
+    "scripting": "Scripting",
+    "config": "Config Format",
+    "partial": "Partial"
+  },
+  "quickstart": {
+    "title": "Quick Start",
+    "step1": "Create configuration file",
+    "step2": "Run Avalon"
+  },
+  "footer": {
+    "copyright": "MIT License",
+    "builtWith": "Built with Rust"
+  },
+  "lang": {
+    "switch": "CN"
+  }
+}

@@ -1,0 +1,82 @@
+{
+  "meta": {
+    "title": "Avalon - 高性能反向代理",
+    "description": "基于 Rust 和 Cloudflare Pingora 构建的现代反向代理"
+  },
+  "nav": {
+    "features": "特性",
+    "docs": "文档",
+    "github": "GitHub"
+  },
+  "docs": {
+    "nav": {
+      "title": "文档",
+      "getting-started": "快速入门",
+      "configuration": "配置参考",
+      "examples": "示例",
+      "rhai": "Rhai 脚本"
+    }
+  },
+  "hero": {
+    "title": "Avalon",
+    "subtitle": "高性能反向代理",
+    "description": "由 Cloudflare Pingora 驱动，Rust 构建",
+    "getStarted": "快速开始",
+    "viewDocs": "查看文档",
+    "viewGithub": "查看 GitHub",
+    "badges": {
+      "https": "自动 HTTPS",
+      "hotReload": "热重载",
+      "rhai": "Rhai 脚本"
+    }
+  },
+  "features": {
+    "title": "特性",
+    "performance": {
+      "title": "性能与可靠性",
+      "pingora": "Cloudflare Pingora 引擎",
+      "rust": "Rust 内存安全",
+      "hotReload": "零停机热重载",
+      "pool": "连接池与复用"
+    },
+    "security": {
+      "title": "安全",
+      "https": "自动 HTTPS",
+      "httpsDesc": "Let's Encrypt, ZeroSSL, Google, Buypass",
+      "ipFilter": "IP 过滤 (CIDR)",
+      "rateLimit": "速率限制",
+      "auth": "认证",
+      "authDesc": "Basic, API Key, JWT"
+    },
+    "advanced": {
+      "title": "高级功能",
+      "loadBalance": "负载均衡",
+      "loadBalanceDesc": "5+ 种算法",
+      "cache": "响应缓存",
+      "compress": "Gzip/Brotli 压缩",
+      "rhai": "Rhai 脚本扩展"
+    }
+  },
+  "comparison": {
+    "title": "对比",
+    "feature": "特性",
+    "language": "语言",
+    "autoHttps": "自动 HTTPS",
+    "hotReload": "热重载",
+    "scripting": "脚本",
+    "config": "配置格式",
+    "partial": "部分"
+  },
+  "quickstart": {
+    "title": "快速开始",
+    "step1": "创建配置文件",
+    "step2": "运行 Avalon"
+  },
+  "footer": {
+    "copyright": "MIT 许可证",
+    "builtWith": "Rust 构建"
+  },
+  "lang": {
+    "switch": "EN"
+  }
+}

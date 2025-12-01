@@ -1,0 +1,18 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import Hero from '../../components/Hero.astro';
+import Features from '../../components/Features.astro';
+import Comparison from '../../components/Comparison.astro';
+import QuickStart from '../../components/QuickStart.astro';
+import Footer from '../../components/Footer.astro';
+
+const lang = 'zh' as const;
+---
+
+<Layout>
+  <Hero lang={lang} />
+  <Features lang={lang} />
+  <Comparison lang={lang} />
+  <QuickStart lang={lang} />
+  <Footer lang={lang} />
+</Layout>

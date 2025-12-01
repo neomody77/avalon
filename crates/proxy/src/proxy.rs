@@ -811,6 +811,7 @@ impl ProxyHttp for AvalonProxy {
                     idle: Duration::from_secs(timeouts.keepalive_interval),
                     interval: Duration::from_secs(timeouts.keepalive_interval),
                     count: timeouts.keepalive_count as usize,
+                    user_timeout: Duration::from_secs(0),
                 });
             }
 

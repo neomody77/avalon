@@ -1,5 +1,5 @@
 # Build stage
-FROM rust:1.83-slim-bookworm AS builder
+FROM rust:1.82-bookworm AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
@@ -7,6 +7,7 @@ RUN apt-get update && apt-get install -y \
     libssl-dev \
     cmake \
     g++ \
+    perl \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

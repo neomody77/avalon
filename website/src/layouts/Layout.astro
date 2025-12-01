@@ -1,0 +1,104 @@
+---
+import { getLangFromUrl, t, getAlternateUrl } from '../i18n';
+import type { Lang } from '../i18n';
+
+interface Props {
+  title?: string;
+  description?: string;
+}
+
+const url = Astro.url;
+const lang = getLangFromUrl(url) as Lang;
+const { title = t(lang, 'meta.title'), description = t(lang, 'meta.description') } = Astro.props;
+const alternateUrl = getAlternateUrl(url, lang === 'en' ? 'zh' : 'en');
+const alternateLang = lang === 'en' ? 'zh' : 'en';
+---
+
+<!doctype html>
+<html lang={lang} class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content={description} />
+    <meta name="keywords" content="reverse proxy, load balancer, Rust, Pingora, HTTPS, TLS, web server, Caddy alternative" />
+    <meta name="author" content="Avalon Team" />
+    <meta name="robots" content="index, follow" />
+
+    <!-- Open Graph -->
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={url.href} />
+    <meta property="og:site_name" content="Avalon" />
+    <meta property="og:locale" content={lang === 'zh' ? 'zh_CN' : 'en_US'} />
+
+    <!-- Twitter Card -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={title} />
+    <meta name="twitter:description" content={description} />
+
+    <!-- Canonical -->
+    <link rel="canonical" href={url.href} />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="alternate" hreflang={alternateLang} href={alternateUrl} />
+    <link rel="alternate" hreflang={lang} href={url.href} />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+    <title>{title}</title>
+  </head>
+  <body class="bg-dark-950 text-dark-100 antialiased min-h-screen">
+    <nav class="fixed top-0 left-0 right-0 z-50 bg-dark-950/80 backdrop-blur-md border-b border-dark-800">
+      <div class="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div class="flex items-center justify-between h-16">
+          <a href={lang === 'zh' ? '/zh' : '/'} class="flex items-center gap-2">
+            <span class="text-xl font-bold bg-gradient-to-r from-accent-400 to-accent-600 bg-clip-text text-transparent">
+              Avalon
+            </span>
+          </a>
+          <div class="flex items-center gap-6">
+            <a href={lang === 'zh' ? '/zh/docs/' : '/docs/'} class="text-dark-300 hover:text-white transition-colors text-sm">
+              {t(lang, 'nav.docs')}
+            </a>
+            <a href="#features" class="text-dark-300 hover:text-white transition-colors text-sm">
+              {t(lang, 'nav.features')}
+            </a>
+            <a
+              href="https://github.com/neomody77/avalon"
+              target="_blank"
+              rel="noopener noreferrer"
+              class="text-dark-300 hover:text-white transition-colors text-sm"
+            >
+              {t(lang, 'nav.github')}
+            </a>
+            <a
+              href={alternateUrl}
+              class="px-3 py-1.5 text-sm border border-dark-600 rounded-md text-dark-300 hover:text-white hover:border-dark-400 transition-colors"
+            >
+              {t(lang, 'lang.switch')}
+            </a>
+          </div>
+        </div>
+      </div>
+    </nav>
+    <main class="pt-16">
+      <slot />
+    </main>
+  </body>
+</html>
+
+<style is:global>
+  * {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  ::selection {
+    background: rgba(99, 102, 241, 0.3);
+  }
+</style>

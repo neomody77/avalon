@@ -1,0 +1,142 @@
+---
+import DocsLayout from '../../layouts/DocsLayout.astro';
+---
+
+<DocsLayout title="Getting Started">
+  <h1>Getting Started</h1>
+
+  <p>Avalon is a high-performance reverse proxy server written in Rust, built on Cloudflare's Pingora framework. It provides automatic HTTPS, load balancing, URL rewriting, and more.</p>
+
+  <h2>Installation</h2>
+
+  <h3>From Source</h3>
+
+  <pre><code># Clone the repository
+git clone https://github.com/neomody77/avalon.git
+cd avalon
+
+# Build release version
+cargo build --release
+
+# Binary is at target/release/avalon</code></pre>
+
+  <h3>Using Docker</h3>
+
+  <pre><code>docker build -t avalon .
+docker run -p 80:80 -p 443:443 -v ./avalon.toml:/app/avalon.toml avalon</code></pre>
+
+  <h2>Minimal Configuration</h2>
+
+  <p>Create an <code>avalon.toml</code> configuration file:</p>
+
+  <pre><code># Global settings
+[global]
+log_level = "info"
+
+# TLS settings (optional)
+[tls]
+acme_enabled = false
+
+# Server configuration
+[[servers]]
+name = "web"
+listen = [":8080"]
+
+# Routing rules
+[[servers.routes]]
+[servers.routes.match]
+path = ["/"]
+
+[servers.routes.handle]
+type = "static_response"
+status = 200
+body = "Hello, Avalon!"
+
+[servers.routes.handle.headers]
+Content-Type = "text/plain"</code></pre>
+
+  <h2>Running</h2>
+
+  <pre><code>./target/release/avalon --config avalon.toml</code></pre>
+
+  <p>Visit <code>http://localhost:8080</code> to see the response.</p>
+
+  <h2>Common Use Cases</h2>
+
+  <h3>1. Reverse Proxy</h3>
+
+  <p>Forward requests to backend services:</p>
+
+  <pre><code>[[servers]]
+name = "api-proxy"
+listen = [":8080"]
+
+[[servers.routes]]
+[servers.routes.match]
+path = ["/api"]
+
+[servers.routes.handle]
+type = "reverse_proxy"
+upstreams = ["127.0.0.1:3000"]</code></pre>
+
+  <h3>2. Load Balancing</h3>
+
+  <pre><code>[[servers.routes]]
+[servers.routes.handle]
+type = "reverse_proxy"
+upstreams = ["127.0.0.1:3001", "127.0.0.1:3002", "127.0.0.1:3003"]
+load_balancing = "round_robin"  # Options: random, least_conn, ip_hash</code></pre>
+
+  <h3>3. Static File Server</h3>
+
+  <pre><code>[[servers.routes]]
+[servers.routes.match]
+path = ["/static"]
+
+[servers.routes.handle]
+type = "file_server"
+root = "/var/www/static"
+browse = false
+index = ["index.html"]</code></pre>
+
+  <h3>4. Automatic HTTPS (Let's Encrypt)</h3>
+
+  <pre><code>[tls]
+email = "admin@example.com"
+acme_enabled = true
+storage_path = "./certs"
+
+[[servers]]
+name = "https-server"
+listen = [":443"]
+
+[[servers.routes]]
+[servers.routes.match]
+host = ["example.com"]
+path = ["/"]
+
+[servers.routes.handle]
+type = "reverse_proxy"
+upstreams = ["127.0.0.1:3000"]</code></pre>
+
+  <h3>5. HTTP to HTTPS Redirect</h3>
+
+  <pre><code>[[servers]]
+name = "http-redirect"
+listen = [":80"]
+https_redirect = true</code></pre>
+
+  <h2>Hot Reload</h2>
+
+  <p>Avalon supports hot configuration reload. After modifying the config file, send a SIGHUP signal:</p>
+
+  <pre><code>kill -HUP $(pidof avalon)</code></pre>
+
+  <h2>Next Steps</h2>
+
+  <ul>
+    <li><a href="/docs/configuration">Configuration Reference</a> - Complete configuration options</li>
+    <li><a href="/docs/examples">Examples</a> - More configuration examples</li>
+    <li><a href="/docs/rhai">Rhai Scripting</a> - Advanced URL rewriting</li>
+  </ul>
+</DocsLayout>

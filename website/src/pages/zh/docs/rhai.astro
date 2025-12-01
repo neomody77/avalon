@@ -1,0 +1,211 @@
+---
+import DocsLayout from '../../../layouts/DocsLayout.astro';
+
+const basicExample = `[servers.routes.handle]
+type = "script"
+script = '''
+// 访问请求信息
+let path = request.path;
+let method = request.method;
+let host = request.host;
+let client_ip = request.client_ip;
+
+// 返回响应
+response(200, "Hello, World!", #{})
+'''`;
+
+const apiGatewayExample = `[servers.routes.handle]
+type = "script"
+script = '''
+let path = request.path;
+let api_key = request.headers["x-api-key"];
+
+// 验证 API Key
+if api_key != "secret-key-123" {
+    response(401, json_stringify(#{ error: "Invalid API key" }), #{
+        "Content-Type": "application/json"
+    })
+} else if path.starts_with("/v1/users") {
+    // 转发到用户服务
+    #{ proxy: "user-service:8080" }
+} else if path.starts_with("/v1/orders") {
+    // 转发到订单服务
+    #{ proxy: "order-service:8080" }
+} else {
+    json_response(#{ error: "Not Found", path: path })
+}
+'''`;
+
+const abTestExample = `[servers.routes.handle]
+type = "script"
+script = '''
+// 基于客户端 IP 的简单 A/B 测试
+let ip_hash = hash_md5(request.client_ip);
+let variant = if ip_hash.starts_with("0") || ip_hash.starts_with("1") {
+    "A"
+} else {
+    "B"
+};
+
+response(200, "", #{
+    "X-AB-Variant": variant,
+    "Set-Cookie": "ab_variant=" + variant + "; Path=/; Max-Age=86400"
+})
+'''`;
+
+const healthCheckExample = `[servers.routes.handle]
+type = "script"
+script = '''
+if request.path == "/health" {
+    json_response(#{
+        status: "ok",
+        timestamp: time_now(),
+        version: "1.0.0"
+    })
+} else {
+    response(404, "Not Found", #{})
+}
+'''`;
+
+const loggingExample = `[servers.routes.handle]
+type = "script"
+script = '''
+// 记录请求详情
+let log_entry = #{
+    path: request.path,
+    method: request.method,
+    client_ip: request.client_ip,
+    timestamp: time_now()
+};
+
+// 继续代理
+#{ proxy: "backend:8080" }
+'''`;
+
+const rateLimitExample = `[servers.routes.handle]
+type = "script"
+script = '''
+// 检查速率限制头
+let remaining = request.headers["x-ratelimit-remaining"];
+
+if remaining == "0" {
+    response(429, json_stringify(#{
+        error: "Too Many Requests",
+        retry_after: 60
+    }), #{
+        "Content-Type": "application/json",
+        "Retry-After": "60"
+    })
+} else {
+    #{ proxy: "backend:8080" }
+}
+'''`;
+---
+
+<DocsLayout title="Rhai 脚本">
+  <h1>Rhai 脚本</h1>
+
+  <p>Avalon 支持使用 Rhai 脚本进行高级请求处理和 URL 重写。Rhai 是一种简单、安全的脚本语言，专为嵌入 Rust 应用程序设计。</p>
+
+  <h2>基本用法</h2>
+
+  <pre><code>{basicExample}</code></pre>
+
+  <h2>请求对象</h2>
+
+  <table>
+    <thead>
+      <tr><th>属性</th><th>类型</th><th>说明</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>request.path</code></td><td>string</td><td>请求路径</td></tr>
+      <tr><td><code>request.method</code></td><td>string</td><td>HTTP 方法</td></tr>
+      <tr><td><code>request.host</code></td><td>string</td><td>请求主机名</td></tr>
+      <tr><td><code>request.client_ip</code></td><td>string</td><td>客户端 IP</td></tr>
+      <tr><td><code>request.query</code></td><td>string</td><td>查询字符串</td></tr>
+      <tr><td><code>request.headers</code></td><td>map</td><td>请求头 (键小写)</td></tr>
+    </tbody>
+  </table>
+
+  <h2>内置函数</h2>
+
+  <h3>响应函数</h3>
+
+  <table>
+    <thead>
+      <tr><th>函数</th><th>说明</th><th>示例</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>response(status, body, headers)</code></td><td>返回自定义响应</td><td><code>response(200, "OK", #&#123;&#125;)</code></td></tr>
+      <tr><td><code>json_response(data)</code></td><td>返回 JSON 响应</td><td><code>json_response(#&#123; key: "value" &#125;)</code></td></tr>
+      <tr><td><code>redirect(url)</code></td><td>302 重定向</td><td><code>redirect("https://example.com")</code></td></tr>
+      <tr><td><code>redirect_with_code(url, code)</code></td><td>指定状态码重定向</td><td><code>redirect_with_code("/new", 301)</code></td></tr>
+    </tbody>
+  </table>
+
+  <h3>字符串函数</h3>
+
+  <table>
+    <thead>
+      <tr><th>函数</th><th>说明</th><th>示例</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>url_encode(str)</code></td><td>URL 编码</td><td><code>url_encode("hello world")</code></td></tr>
+      <tr><td><code>url_decode(str)</code></td><td>URL 解码</td><td><code>url_decode("hello%20world")</code></td></tr>
+      <tr><td><code>base64_encode(str)</code></td><td>Base64 编码</td><td><code>base64_encode("hello")</code></td></tr>
+      <tr><td><code>base64_decode(str)</code></td><td>Base64 解码</td><td><code>base64_decode("aGVsbG8=")</code></td></tr>
+      <tr><td><code>regex_match(pattern, text)</code></td><td>正则匹配</td><td><code>regex_match("^/api/", path)</code></td></tr>
+      <tr><td><code>regex_replace(pattern, repl, text)</code></td><td>正则替换</td><td><code>regex_replace("old", "new", text)</code></td></tr>
+    </tbody>
+  </table>
+
+  <h3>JSON 函数</h3>
+
+  <table>
+    <thead>
+      <tr><th>函数</th><th>说明</th><th>示例</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>json_parse(str)</code></td><td>解析 JSON</td><td><code>json_parse('&#123;"a":1&#125;')</code></td></tr>
+      <tr><td><code>json_stringify(obj)</code></td><td>转为 JSON 字符串</td><td><code>json_stringify(#&#123; a: 1 &#125;)</code></td></tr>
+    </tbody>
+  </table>
+
+  <h3>工具函数</h3>
+
+  <table>
+    <thead>
+      <tr><th>函数</th><th>说明</th><th>示例</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>query_param(name)</code></td><td>获取查询参数</td><td><code>query_param("page")</code></td></tr>
+      <tr><td><code>hash_md5(str)</code></td><td>MD5 哈希</td><td><code>hash_md5("password")</code></td></tr>
+      <tr><td><code>hash_sha256(str)</code></td><td>SHA256 哈希</td><td><code>hash_sha256("data")</code></td></tr>
+      <tr><td><code>time_now()</code></td><td>当前 Unix 时间戳</td><td><code>time_now()</code></td></tr>
+    </tbody>
+  </table>
+
+  <hr />
+
+  <h2>示例</h2>
+
+  <h3>API 网关路由</h3>
+
+  <pre><code>{apiGatewayExample}</code></pre>
+
+  <h3>A/B 测试</h3>
+
+  <pre><code>{abTestExample}</code></pre>
+
+  <h3>健康检查端点</h3>
+
+  <pre><code>{healthCheckExample}</code></pre>
+
+  <h3>请求日志</h3>
+
+  <pre><code>{loggingExample}</code></pre>
+
+  <h3>速率限制响应</h3>
+
+  <pre><code>{rateLimitExample}</code></pre>
+</DocsLayout>

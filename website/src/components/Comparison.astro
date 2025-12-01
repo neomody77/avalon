@@ -1,0 +1,125 @@
+---
+import { t } from '../i18n';
+import type { Lang } from '../i18n';
+
+interface Props {
+  lang: Lang;
+}
+
+const { lang } = Astro.props;
+
+const comparisons = [
+  { feature: t(lang, 'comparison.language'), avalon: 'Rust', caddy: 'Go', nginx: 'C', haproxy: 'C' },
+  { feature: t(lang, 'comparison.autoHttps'), avalon: true, caddy: true, nginx: false, haproxy: false },
+  { feature: t(lang, 'comparison.hotReload'), avalon: true, caddy: true, nginx: t(lang, 'comparison.partial'), haproxy: t(lang, 'comparison.partial') },
+  { feature: t(lang, 'comparison.scripting'), avalon: 'Rhai', caddy: '-', nginx: 'Lua', haproxy: '-' },
+  { feature: t(lang, 'comparison.config'), avalon: 'TOML', caddy: 'Caddyfile', nginx: lang === 'zh' ? '专有' : 'Proprietary', haproxy: lang === 'zh' ? '专有' : 'Proprietary' },
+];
+---
+
+<section class="py-24 px-4 bg-dark-900/30">
+  <div class="max-w-5xl mx-auto">
+    <h2 class="text-3xl sm:text-4xl font-bold text-center mb-16">
+      <span class="bg-gradient-to-r from-white to-dark-300 bg-clip-text text-transparent">
+        {t(lang, 'comparison.title')}
+      </span>
+    </h2>
+
+    <div class="overflow-x-auto">
+      <table class="w-full">
+        <thead>
+          <tr class="border-b border-dark-700">
+            <th class="text-left py-4 px-4 text-dark-400 font-medium">{t(lang, 'comparison.feature')}</th>
+            <th class="text-center py-4 px-4 font-semibold text-accent-400">Avalon</th>
+            <th class="text-center py-4 px-4 text-dark-300 font-medium">Caddy</th>
+            <th class="text-center py-4 px-4 text-dark-300 font-medium">Nginx</th>
+            <th class="text-center py-4 px-4 text-dark-300 font-medium">HAProxy</th>
+          </tr>
+        </thead>
+        <tbody>
+          {comparisons.map((row, i) => (
+            <tr class={`border-b border-dark-800 ${i % 2 === 0 ? 'bg-dark-900/30' : ''}`}>
+              <td class="py-4 px-4 text-dark-200">{row.feature}</td>
+              <td class="text-center py-4 px-4">
+                {typeof row.avalon === 'boolean' ? (
+                  row.avalon ? (
+                    <span class="inline-flex items-center justify-center w-6 h-6 bg-green-500/20 rounded-full">
+                      <svg class="w-4 h-4 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
+                      </svg>
+                    </span>
+                  ) : (
+                    <span class="inline-flex items-center justify-center w-6 h-6 bg-red-500/20 rounded-full">
+                      <svg class="w-4 h-4 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                      </svg>
+                    </span>
+                  )
+                ) : (
+                  <span class="text-accent-400 font-medium">{row.avalon}</span>
+                )}
+              </td>
+              <td class="text-center py-4 px-4">
+                {typeof row.caddy === 'boolean' ? (
+                  row.caddy ? (
+                    <span class="inline-flex items-center justify-center w-6 h-6 bg-green-500/20 rounded-full">
+                      <svg class="w-4 h-4 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
+                      </svg>
+                    </span>
+                  ) : (
+                    <span class="inline-flex items-center justify-center w-6 h-6 bg-red-500/20 rounded-full">
+                      <svg class="w-4 h-4 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                      </svg>
+                    </span>
+                  )
+                ) : (
+                  <span class="text-dark-400">{row.caddy}</span>
+                )}
+              </td>
+              <td class="text-center py-4 px-4">
+                {typeof row.nginx === 'boolean' ? (
+                  row.nginx ? (
+                    <span class="inline-flex items-center justify-center w-6 h-6 bg-green-500/20 rounded-full">
+                      <svg class="w-4 h-4 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
+                      </svg>
+                    </span>
+                  ) : (
+                    <span class="inline-flex items-center justify-center w-6 h-6 bg-red-500/20 rounded-full">
+                      <svg class="w-4 h-4 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                      </svg>
+                    </span>
+                  )
+                ) : (
+                  <span class="text-dark-400">{row.nginx}</span>
+                )}
+              </td>
+              <td class="text-center py-4 px-4">
+                {typeof row.haproxy === 'boolean' ? (
+                  row.haproxy ? (
+                    <span class="inline-flex items-center justify-center w-6 h-6 bg-green-500/20 rounded-full">
+                      <svg class="w-4 h-4 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
+                      </svg>
+                    </span>
+                  ) : (
+                    <span class="inline-flex items-center justify-center w-6 h-6 bg-red-500/20 rounded-full">
+                      <svg class="w-4 h-4 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                      </svg>
+                    </span>
+                  )
+                ) : (
+                  <span class="text-dark-400">{row.haproxy}</span>
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>

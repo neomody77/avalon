@@ -1,0 +1,216 @@
+---
+import DocsLayout from '../../layouts/DocsLayout.astro';
+---
+
+<DocsLayout title="Examples">
+  <h1>Configuration Examples</h1>
+
+  <p>This page provides practical configuration examples for common use cases.</p>
+
+  <h2>Basic Reverse Proxy</h2>
+
+  <pre><code>[[servers]]
+name = "api"
+listen = [":8080"]
+
+[[servers.routes]]
+[servers.routes.match]
+path = ["/"]
+
+[servers.routes.handle]
+type = "reverse_proxy"
+upstreams = ["127.0.0.1:3000"]</code></pre>
+
+  <hr />
+
+  <h2>Multi-domain Virtual Hosting</h2>
+
+  <pre><code>[[servers]]
+name = "multi-site"
+listen = [":80", ":443"]
+
+# Site 1
+[[servers.routes]]
+[servers.routes.match]
+host = ["www.site1.com", "site1.com"]
+
+[servers.routes.handle]
+type = "file_server"
+root = "/var/www/site1"
+
+# Site 2
+[[servers.routes]]
+[servers.routes.match]
+host = ["www.site2.com", "site2.com"]
+
+[servers.routes.handle]
+type = "reverse_proxy"
+upstreams = ["127.0.0.1:3001"]</code></pre>
+
+  <hr />
+
+  <h2>Load Balancing with Health Checks</h2>
+
+  <pre><code>[[servers]]
+name = "lb"
+listen = [":80"]
+
+[[servers.routes]]
+[servers.routes.handle]
+type = "reverse_proxy"
+upstreams = ["10.0.0.1:8080", "10.0.0.2:8080", "10.0.0.3:8080"]
+load_balancing = "round_robin"
+lb_try_duration = 5
+lb_try_interval = 250
+
+[servers.routes.handle.health_check]
+path = "/health"
+interval = "10s"
+timeout = "5s"
+expected_status = 200</code></pre>
+
+  <hr />
+
+  <h2>API Gateway with Authentication</h2>
+
+  <pre><code>[[servers]]
+name = "api-gateway"
+listen = [":443"]
+
+[[servers.routes]]
+[servers.routes.match]
+host = ["api.example.com"]
+path = ["/v1"]
+
+[servers.routes.handle]
+type = "reverse_proxy"
+upstreams = ["127.0.0.1:3000"]
+
+[servers.routes.handle.auth]
+realm = "API"
+
+[[servers.routes.handle.auth.api_keys]]
+key = "sk-production-key-xxx"
+source = "header"
+param_name = "X-API-Key"
+
+[servers.routes.handle.cors]
+allowed_origins = ["https://app.example.com"]
+allowed_methods = ["GET", "POST", "PUT", "DELETE"]
+allow_credentials = true</code></pre>
+
+  <hr />
+
+  <h2>Static Site with SPA Fallback</h2>
+
+  <pre><code>[[servers]]
+name = "spa"
+listen = [":80"]
+
+[[servers.routes]]
+[servers.routes.handle]
+type = "file_server"
+root = "/var/www/app/dist"
+index = ["index.html"]
+# SPA fallback is handled by index = ["index.html"]</code></pre>
+
+  <hr />
+
+  <h2>Full Production Setup</h2>
+
+  <pre><code># Global settings
+[global]
+log_level = "info"
+access_log = "/var/log/avalon/access.log"
+access_log_format = "json"
+
+[global.compression]
+enabled = true
+level = 6
+
+[global.cache]
+enabled = true
+default_ttl = 300
+
+# TLS with Let's Encrypt
+[tls]
+email = "admin@example.com"
+acme_enabled = true
+storage_path = "/etc/avalon/certs"
+
+# HTTP to HTTPS redirect
+[[servers]]
+name = "http-redirect"
+listen = [":80"]
+https_redirect = true
+
+# Main HTTPS server
+[[servers]]
+name = "main"
+listen = [":443"]
+
+# API routes
+[[servers.routes]]
+[servers.routes.match]
+host = ["api.example.com"]
+path = ["/api"]
+
+[servers.routes.handle]
+type = "reverse_proxy"
+upstreams = ["127.0.0.1:3000", "127.0.0.1:3001"]
+load_balancing = "round_robin"
+
+[servers.routes.handle.health_check]
+path = "/health"
+interval = "10s"
+
+[servers.routes.handle.rewrite]
+strip_path_prefix = "/api"
+
+# Static website
+[[servers.routes]]
+[servers.routes.match]
+host = ["www.example.com"]
+
+[servers.routes.handle]
+type = "file_server"
+root = "/var/www/html"
+index = ["index.html"]
+
+# Default 404
+[[servers.routes]]
+[servers.routes.handle]
+type = "static_response"
+status = 404
+body = "Not Found"</code></pre>
+
+  <hr />
+
+  <h2>WebSocket Proxy</h2>
+
+  <pre><code>[[servers]]
+name = "ws"
+listen = [":8080"]
+
+[[servers.routes]]
+[servers.routes.match]
+path = ["/ws"]
+
+[servers.routes.handle]
+type = "reverse_proxy"
+upstreams = ["127.0.0.1:3000"]
+# WebSocket is automatically supported</code></pre>
+
+  <hr />
+
+  <h2>Rate Limiting</h2>
+
+  <pre><code>[[servers.routes]]
+[servers.routes.handle]
+type = "reverse_proxy"
+upstreams = ["127.0.0.1:3000"]
+
+[servers.routes.handle.rate_limit]
+requests_per_second = 100
+burst = 50</code></pre>
+</DocsLayout>

@@ -1,0 +1,188 @@
+---
+import DocsLayout from '../../layouts/DocsLayout.astro';
+---
+
+<DocsLayout title="Configuration Reference">
+  <h1>Configuration Reference</h1>
+
+  <p>Avalon uses TOML format configuration files. This document details all available configuration options.</p>
+
+  <h2>Configuration Structure</h2>
+
+  <pre><code>[global]      # Global settings
+[tls]         # TLS/HTTPS settings
+[[servers]]   # Server configuration (array)</code></pre>
+
+  <hr />
+
+  <h2>[global] Global Settings</h2>
+
+  <table>
+    <thead>
+      <tr><th>Option</th><th>Type</th><th>Default</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>log_level</code></td><td>string</td><td><code>"info"</code></td><td>Log level: trace, debug, info, warn, error</td></tr>
+      <tr><td><code>admin_listen</code></td><td>string</td><td><code>"localhost:2019"</code></td><td>Admin API listen address</td></tr>
+      <tr><td><code>access_log</code></td><td>string</td><td>-</td><td>Access log file path</td></tr>
+      <tr><td><code>access_log_format</code></td><td>string</td><td><code>"common"</code></td><td>Log format: common, json, combined</td></tr>
+    </tbody>
+  </table>
+
+  <h3>[global.compression] Compression Settings</h3>
+
+  <table>
+    <thead>
+      <tr><th>Option</th><th>Type</th><th>Default</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>enabled</code></td><td>bool</td><td><code>true</code></td><td>Enable response compression</td></tr>
+      <tr><td><code>gzip</code></td><td>bool</td><td><code>true</code></td><td>Enable gzip</td></tr>
+      <tr><td><code>brotli</code></td><td>bool</td><td><code>true</code></td><td>Enable brotli</td></tr>
+      <tr><td><code>min_size</code></td><td>int</td><td><code>1024</code></td><td>Minimum compression size (bytes)</td></tr>
+      <tr><td><code>level</code></td><td>int</td><td><code>6</code></td><td>Compression level (gzip: 1-9, brotli: 0-11)</td></tr>
+    </tbody>
+  </table>
+
+  <h3>[global.cache] Cache Settings</h3>
+
+  <table>
+    <thead>
+      <tr><th>Option</th><th>Type</th><th>Default</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>enabled</code></td><td>bool</td><td><code>false</code></td><td>Enable response caching</td></tr>
+      <tr><td><code>default_ttl</code></td><td>int</td><td><code>300</code></td><td>Default cache time (seconds)</td></tr>
+      <tr><td><code>max_entry_size</code></td><td>int</td><td><code>10485760</code></td><td>Max single cache entry size (10MB)</td></tr>
+      <tr><td><code>max_cache_size</code></td><td>int</td><td><code>104857600</code></td><td>Max total cache size (100MB)</td></tr>
+    </tbody>
+  </table>
+
+  <hr />
+
+  <h2>[tls] TLS Settings</h2>
+
+  <table>
+    <thead>
+      <tr><th>Option</th><th>Type</th><th>Default</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>email</code></td><td>string</td><td>-</td><td>ACME account email (required if ACME enabled)</td></tr>
+      <tr><td><code>acme_enabled</code></td><td>bool</td><td><code>true</code></td><td>Enable ACME auto certificates</td></tr>
+      <tr><td><code>acme_ca</code></td><td>string</td><td>Let's Encrypt</td><td>ACME CA URL or provider name</td></tr>
+      <tr><td><code>storage_path</code></td><td>string</td><td><code>"./certs"</code></td><td>Certificate storage directory</td></tr>
+      <tr><td><code>cert_path</code></td><td>string</td><td>-</td><td>Manual certificate file path</td></tr>
+      <tr><td><code>key_path</code></td><td>string</td><td>-</td><td>Manual private key file path</td></tr>
+    </tbody>
+  </table>
+
+  <p><strong>ACME CA options:</strong></p>
+  <ul>
+    <li><code>letsencrypt</code> - Let's Encrypt (default)</li>
+    <li><code>le-staging</code> - Let's Encrypt staging</li>
+    <li><code>zerossl</code> - ZeroSSL</li>
+    <li><code>buypass</code> - Buypass</li>
+    <li><code>google</code> - Google Trust Services</li>
+  </ul>
+
+  <hr />
+
+  <h2>[[servers]] Server Configuration</h2>
+
+  <table>
+    <thead>
+      <tr><th>Option</th><th>Type</th><th>Default</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>name</code></td><td>string</td><td><code>"default"</code></td><td>Server name (for logging)</td></tr>
+      <tr><td><code>listen</code></td><td>array</td><td>-</td><td>Listen addresses (required)</td></tr>
+      <tr><td><code>https_redirect</code></td><td>bool</td><td><code>false</code></td><td>Auto redirect HTTP to HTTPS</td></tr>
+    </tbody>
+  </table>
+
+  <hr />
+
+  <h2>Handler Types</h2>
+
+  <h3>reverse_proxy</h3>
+
+  <pre><code>[servers.routes.handle]
+type = "reverse_proxy"
+upstreams = ["127.0.0.1:3000", "127.0.0.1:3001"]
+load_balancing = "round_robin"
+timeout = 30</code></pre>
+
+  <p><strong>Load balancing strategies:</strong></p>
+  <ul>
+    <li><code>round_robin</code> - Round robin</li>
+    <li><code>random</code> - Random</li>
+    <li><code>least_conn</code> - Least connections</li>
+    <li><code>ip_hash</code> - IP hash</li>
+    <li><code>first</code> - Always use first</li>
+  </ul>
+
+  <h3>file_server</h3>
+
+  <pre><code>[servers.routes.handle]
+type = "file_server"
+root = "/var/www/html"
+browse = false
+index = ["index.html", "index.htm"]
+compress = true</code></pre>
+
+  <h3>static_response</h3>
+
+  <pre><code>[servers.routes.handle]
+type = "static_response"
+status = 200
+body = "Hello, World!"
+
+[servers.routes.handle.headers]
+Content-Type = "text/plain"</code></pre>
+
+  <h3>redirect</h3>
+
+  <pre><code>[servers.routes.handle]
+type = "redirect"
+to = "https://example.com&#123;uri&#125;"
+code = 301</code></pre>
+
+  <hr />
+
+  <h2>Authentication</h2>
+
+  <h3>Basic Auth</h3>
+
+  <pre><code>[servers.routes.handle.auth]
+realm = "Protected Area"
+
+[[servers.routes.handle.auth.basic]]
+username = "admin"
+password = "password123"</code></pre>
+
+  <h3>API Key Auth</h3>
+
+  <pre><code>[[servers.routes.handle.auth.api_keys]]
+key = "sk-xxxx"
+name = "production"
+source = "header"
+param_name = "X-API-Key"</code></pre>
+
+  <h3>JWT Auth</h3>
+
+  <pre><code>[servers.routes.handle.auth.jwt]
+secret = "your-secret-key"
+algorithm = "HS256"
+header = "Authorization"</code></pre>
+
+  <hr />
+
+  <h2>CORS</h2>
+
+  <pre><code>[servers.routes.handle.cors]
+allowed_origins = ["https://example.com"]
+allowed_methods = ["GET", "POST", "PUT", "DELETE"]
+allowed_headers = ["Content-Type", "Authorization"]
+allow_credentials = true
+max_age = 3600</code></pre>
+</DocsLayout>
