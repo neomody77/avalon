@@ -466,11 +466,10 @@ fn start_config_watcher(config_path: PathBuf, proxy: AvalonProxy) -> Result<()> 
         match rx.recv() {
             Ok(Ok(event)) => {
                 // Only react to modify events
-                let should_reload = match event.kind {
-                    EventKind::Modify(ModifyKind::Data(_)) => true,
-                    EventKind::Modify(ModifyKind::Any) => true,
-                    _ => false,
-                };
+                let should_reload = matches!(
+                    event.kind,
+                    EventKind::Modify(ModifyKind::Data(_)) | EventKind::Modify(ModifyKind::Any)
+                );
 
                 if should_reload {
                     // Debounce - avoid rapid reloads

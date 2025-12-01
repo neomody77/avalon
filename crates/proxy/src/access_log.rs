@@ -24,9 +24,10 @@ pub struct AccessLogEntry {
 }
 
 /// Log format type
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub enum LogFormat {
     /// Apache Common Log Format
+    #[default]
     Common,
     /// Apache Combined Log Format
     Combined,
@@ -34,13 +35,15 @@ pub enum LogFormat {
     Json,
 }
 
-impl LogFormat {
-    pub fn from_str(s: &str) -> Self {
-        match s.to_lowercase().as_str() {
+impl std::str::FromStr for LogFormat {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s.to_lowercase().as_str() {
             "combined" => LogFormat::Combined,
             "json" => LogFormat::Json,
             _ => LogFormat::Common,
-        }
+        })
     }
 }
 
@@ -182,10 +185,10 @@ mod tests {
 
     #[test]
     fn test_log_format_from_str() {
-        assert_eq!(LogFormat::from_str("common"), LogFormat::Common);
-        assert_eq!(LogFormat::from_str("combined"), LogFormat::Combined);
-        assert_eq!(LogFormat::from_str("json"), LogFormat::Json);
-        assert_eq!(LogFormat::from_str("unknown"), LogFormat::Common);
+        assert_eq!("common".parse::<LogFormat>().unwrap(), LogFormat::Common);
+        assert_eq!("combined".parse::<LogFormat>().unwrap(), LogFormat::Combined);
+        assert_eq!("json".parse::<LogFormat>().unwrap(), LogFormat::Json);
+        assert_eq!("unknown".parse::<LogFormat>().unwrap(), LogFormat::Common);
     }
 
     #[test]

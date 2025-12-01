@@ -81,6 +81,7 @@ pub fn init_telemetry(config: &TracingConfig) -> Option<SdkTracerProvider> {
 }
 
 /// Shutdown OpenTelemetry and flush pending traces
+#[allow(dead_code)]
 pub fn shutdown_telemetry(provider: Option<SdkTracerProvider>) {
     if let Some(provider) = provider {
         info!("Shutting down OpenTelemetry tracing");

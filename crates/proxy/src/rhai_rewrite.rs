@@ -46,7 +46,7 @@ impl RequestContext {
         headers: HashMap<String, String>,
     ) -> Self {
         let query_params = query
-            .map(|q| parse_query_string(q))
+            .map(parse_query_string)
             .unwrap_or_default();
 
         Self {
@@ -248,33 +248,36 @@ fn register_builtin_functions(engine: &mut Engine) {
     });
 }
 
+/// Expression mode data for compiled Rhai rule
+pub struct ExpressionRule {
+    /// Compiled condition expression (when clause)
+    pub condition: Option<AST>,
+    /// Compiled path expression
+    pub path_expr: Option<AST>,
+    /// Compiled query expression
+    pub query_expr: Option<AST>,
+    /// Headers to set (key -> compiled expression)
+    pub headers_set: Vec<(String, AST)>,
+    /// Headers to add (key -> compiled expression)
+    pub headers_add: Vec<(String, AST)>,
+    /// Headers to delete
+    pub headers_delete: Vec<String>,
+    /// Action: "continue", "redirect", "reject"
+    pub action: String,
+    /// Redirect configuration
+    pub redirect_location: Option<AST>,
+    pub redirect_status: u16,
+    /// Reject configuration
+    pub reject_status: u16,
+    pub reject_body: Option<String>,
+    /// Stop processing after this rule
+    pub stop: bool,
+}
+
 /// Compiled Rhai rewrite rule - supports both expression mode and script mode
 pub enum CompiledRhaiRule {
     /// Expression mode (declarative)
-    Expression {
-        /// Compiled condition expression (when clause)
-        condition: Option<AST>,
-        /// Compiled path expression
-        path_expr: Option<AST>,
-        /// Compiled query expression
-        query_expr: Option<AST>,
-        /// Headers to set (key -> compiled expression)
-        headers_set: Vec<(String, AST)>,
-        /// Headers to add (key -> compiled expression)
-        headers_add: Vec<(String, AST)>,
-        /// Headers to delete
-        headers_delete: Vec<String>,
-        /// Action: "continue", "redirect", "reject"
-        action: String,
-        /// Redirect configuration
-        redirect_location: Option<AST>,
-        redirect_status: u16,
-        /// Reject configuration
-        reject_status: u16,
-        reject_body: Option<String>,
-        /// Stop processing after this rule
-        stop: bool,
-    },
+    Expression(Box<ExpressionRule>),
     /// Script mode (imperative) - modifies request object directly
     Script {
         /// Compiled full script
@@ -337,7 +340,7 @@ impl CompiledRhaiRule {
             None
         };
 
-        Ok(Self::Expression {
+        Ok(Self::Expression(Box::new(ExpressionRule {
             condition,
             path_expr,
             query_expr,
@@ -350,14 +353,14 @@ impl CompiledRhaiRule {
             reject_status: config.reject_status.unwrap_or(403),
             reject_body: config.reject_body.clone(),
             stop: config.stop.unwrap_or(true),
-        })
+        })))
     }
 
     /// Evaluate whether this rule matches the request
     pub fn matches(&self, ctx: &RequestContext) -> Result<bool, RhaiRewriteError> {
         match self {
             Self::Script { .. } => Ok(true), // Script mode always runs
-            Self::Expression { condition, .. } => match condition {
+            Self::Expression(expr) => match &expr.condition {
                 Some(ast) => {
                     let engine = &*RHAI_ENGINE;
                     let mut scope = Scope::new();
@@ -381,32 +384,19 @@ impl CompiledRhaiRule {
     pub fn apply(&self, ctx: &RequestContext) -> Result<RewriteResult, RhaiRewriteError> {
         match self {
             Self::Script { ast } => Self::apply_script(ast, ctx),
-            Self::Expression {
-                path_expr,
-                query_expr,
-                headers_set,
-                headers_add,
-                headers_delete,
-                action,
-                redirect_location,
-                redirect_status,
-                reject_status,
-                reject_body,
-                stop,
-                ..
-            } => Self::apply_expression(
+            Self::Expression(expr) => Self::apply_expression(
                 ctx,
-                path_expr.as_ref(),
-                query_expr.as_ref(),
-                headers_set,
-                headers_add,
-                headers_delete,
-                action,
-                redirect_location.as_ref(),
-                *redirect_status,
-                *reject_status,
-                reject_body.as_ref(),
-                *stop,
+                expr.path_expr.as_ref(),
+                expr.query_expr.as_ref(),
+                &expr.headers_set,
+                &expr.headers_add,
+                &expr.headers_delete,
+                &expr.action,
+                expr.redirect_location.as_ref(),
+                expr.redirect_status,
+                expr.reject_status,
+                expr.reject_body.as_ref(),
+                expr.stop,
             ),
         }
     }
@@ -486,14 +476,14 @@ impl CompiledRhaiRule {
 
             // Extract redirect_status
             if let Some(status) = map.get("redirect_status") {
-                if let Some(n) = status.as_int().ok() {
+                if let Ok(n) = status.as_int() {
                     result.redirect_status = n as u16;
                 }
             }
 
             // Extract reject_status
             if let Some(status) = map.get("reject_status") {
-                if let Some(n) = status.as_int().ok() {
+                if let Ok(n) = status.as_int() {
                     result.reject_status = n as u16;
                 }
             }
@@ -517,6 +507,7 @@ impl CompiledRhaiRule {
     }
 
     /// Apply expression mode (declarative)
+    #[allow(clippy::too_many_arguments)]
     fn apply_expression(
         ctx: &RequestContext,
         path_expr: Option<&AST>,

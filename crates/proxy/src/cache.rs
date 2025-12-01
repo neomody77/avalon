@@ -275,13 +275,13 @@ impl ResponseCache {
             if name.eq_ignore_ascii_case("cache-control") {
                 for directive in value.split(',') {
                     let directive = directive.trim().to_lowercase();
-                    if directive.starts_with("s-maxage=") {
+                    if let Some(value) = directive.strip_prefix("s-maxage=") {
                         // s-maxage takes precedence for shared caches
-                        if let Ok(secs) = directive[9..].parse::<u64>() {
+                        if let Ok(secs) = value.parse::<u64>() {
                             s_maxage = Some(secs);
                         }
-                    } else if directive.starts_with("max-age=") {
-                        if let Ok(secs) = directive[8..].parse::<u64>() {
+                    } else if let Some(value) = directive.strip_prefix("max-age=") {
+                        if let Ok(secs) = value.parse::<u64>() {
                             max_age = Some(secs);
                         }
                     }

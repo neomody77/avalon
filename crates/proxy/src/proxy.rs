@@ -182,7 +182,7 @@ impl AvalonProxy {
 
         // Initialize access logger if configured
         let access_logger = if let Some(path) = &config.global.access_log {
-            let format = LogFormat::from_str(&config.global.access_log_format);
+            let format: LogFormat = config.global.access_log_format.parse().unwrap_or_default();
             match AccessLogger::new(path, format) {
                 Ok(logger) => {
                     info!(path = %path, "Access logging enabled");
@@ -1056,7 +1056,7 @@ impl ProxyHttp for AvalonProxy {
         }
 
         // Add X-Forwarded-Proto (TODO: detect TLS from session)
-        let proto = if ctx.upstream.as_ref().map_or(false, |u| u.use_tls) {
+        let proto = if ctx.upstream.as_ref().is_some_and(|u| u.use_tls) {
             "https"
         } else {
             "http"

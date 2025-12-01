@@ -19,7 +19,7 @@ pub enum ConfigError {
 }
 
 /// Root configuration structure
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
     /// Global settings
     #[serde(default)]
@@ -113,16 +113,6 @@ impl Config {
     }
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            global: GlobalConfig::default(),
-            tls: TlsConfig::default(),
-            plugins: PluginsConfig::default(),
-            servers: Vec::new(),
-        }
-    }
-}
 
 /// Plugin system configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -191,21 +181,16 @@ fn default_plugin_enabled() -> bool {
 }
 
 /// Plugin type enumeration
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginType {
     /// Statically compiled plugin (built into binary)
+    #[default]
     Static,
     /// Dynamically loaded native plugin (.so/.dylib/.dll)
     Dynamic,
     /// WebAssembly plugin (.wasm)
     Wasm,
-}
-
-impl Default for PluginType {
-    fn default() -> Self {
-        PluginType::Static
-    }
 }
 
 /// WASM plugin runtime configuration
@@ -616,7 +601,7 @@ impl MatchConfig {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum HandlerConfig {
     /// Reverse proxy handler
-    ReverseProxy(ReverseProxyConfig),
+    ReverseProxy(Box<ReverseProxyConfig>),
 
     /// Static file server
     FileServer(FileServerConfig),
@@ -1392,7 +1377,7 @@ upstreams = ["127.0.0.1:9090"]
                 listen: vec![":8080".to_string()],
                 routes: vec![RouteConfig {
                     match_rule: MatchConfig::default(),
-                    handle: HandlerConfig::ReverseProxy(ReverseProxyConfig {
+                    handle: HandlerConfig::ReverseProxy(Box::new(ReverseProxyConfig {
                         upstreams: vec![],
                         load_balancing: LoadBalancingStrategy::RoundRobin,
                         health_check: None,
@@ -1410,7 +1395,9 @@ upstreams = ["127.0.0.1:9090"]
                         max_request_body_size: 0,
                         circuit_breaker: None,
                         ip_filter: None,
-                    }),
+                        upstream_http2: false,
+                        upstream_mtls: None,
+                    })),
                 }],
                 https_redirect: false,
             }],

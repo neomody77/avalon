@@ -11,21 +11,12 @@ use std::str::FromStr;
 use tracing::debug;
 
 /// IP filter configuration
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct IpFilterConfig {
     /// IPs to allow (whitelist mode)
     pub allow: Vec<String>,
     /// IPs to deny (blacklist mode)
     pub deny: Vec<String>,
-}
-
-impl Default for IpFilterConfig {
-    fn default() -> Self {
-        Self {
-            allow: Vec::new(),
-            deny: Vec::new(),
-        }
-    }
 }
 
 /// A parsed CIDR range

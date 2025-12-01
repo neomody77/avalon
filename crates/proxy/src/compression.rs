@@ -103,7 +103,7 @@ pub fn is_already_compressed(content_encoding: Option<&str>) -> bool {
 
 /// Compress data using gzip
 pub fn compress_gzip(data: &[u8], level: u32) -> Result<Bytes, std::io::Error> {
-    let level = level.min(9) as u32;
+    let level = level.min(9);
     let mut encoder = GzEncoder::new(Vec::new(), Compression::new(level));
     encoder.write_all(data)?;
     let compressed = encoder.finish()?;
@@ -120,11 +120,13 @@ pub fn compress_gzip(data: &[u8], level: u32) -> Result<Bytes, std::io::Error> {
 
 /// Compress data using brotli
 pub fn compress_brotli(data: &[u8], level: u32) -> Result<Bytes, std::io::Error> {
-    let level = level.min(11) as u32;
+    let level = level.min(11);
     let mut compressed = Vec::new();
 
-    let mut params = brotli::enc::BrotliEncoderParams::default();
-    params.quality = level as i32;
+    let params = brotli::enc::BrotliEncoderParams {
+        quality: level as i32,
+        ..Default::default()
+    };
 
     let mut encoder = brotli::CompressorWriter::with_params(&mut compressed, 4096, &params);
     encoder.write_all(data)?;

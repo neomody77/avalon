@@ -229,9 +229,7 @@ impl CompiledAuth {
                         // Simple query string parsing
                         qs.split('&')
                             .find_map(|pair| {
-                                let mut parts = pair.splitn(2, '=');
-                                let key = parts.next()?;
-                                let value = parts.next()?;
+                                let (key, value) = pair.split_once('=')?;
                                 if key == param_name {
                                     Some(value)
                                 } else {

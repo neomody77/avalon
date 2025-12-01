@@ -279,8 +279,11 @@ pub fn discover_certificates<P: AsRef<Path>>(base_path: P) -> Vec<DiscoveredCert
     discovered
 }
 
+/// Certificate info returned from parsing
+type CertInfo = (Vec<String>, DateTime<Utc>, DateTime<Utc>, bool);
+
 /// Parse certificate file and extract domains, expiration, not_before, is_self_signed
-fn parse_certificate_file(path: &Path) -> Result<(Vec<String>, DateTime<Utc>, DateTime<Utc>, bool), String> {
+fn parse_certificate_file(path: &Path) -> Result<CertInfo, String> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| format!("Failed to read cert file: {}", e))?;
 

@@ -62,7 +62,7 @@ impl ScriptRequestContext {
         headers: HashMap<String, String>,
     ) -> Self {
         let query_params = query
-            .map(|q| parse_query_string(q))
+            .map(parse_query_string)
             .unwrap_or_default();
 
         Self {

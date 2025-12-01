@@ -280,7 +280,7 @@ mod tests {
                     method: None,
                     header: None,
                 },
-                handle: HandlerConfig::ReverseProxy(ReverseProxyConfig {
+                handle: HandlerConfig::ReverseProxy(Box::new(ReverseProxyConfig {
                     upstreams: vec!["127.0.0.1:9090".to_string()],
                     load_balancing: LoadBalancingStrategy::RoundRobin,
                     health_check: None,
@@ -298,7 +298,9 @@ mod tests {
                     max_request_body_size: 0,
                     circuit_breaker: None,
                     ip_filter: None,
-                }),
+                    upstream_http2: false,
+                    upstream_mtls: None,
+                })),
             }],
             https_redirect: false,
         }
@@ -496,7 +498,7 @@ mod tests {
     fn test_compiled_route_with_upstream() {
         let route_config = RouteConfig {
             match_rule: MatchConfig::default(),
-            handle: HandlerConfig::ReverseProxy(ReverseProxyConfig {
+            handle: HandlerConfig::ReverseProxy(Box::new(ReverseProxyConfig {
                 upstreams: vec!["127.0.0.1:8080".to_string(), "127.0.0.1:8081".to_string()],
                 load_balancing: LoadBalancingStrategy::RoundRobin,
                 health_check: None,
@@ -514,7 +516,9 @@ mod tests {
                 max_request_body_size: 0,
                 circuit_breaker: None,
                 ip_filter: None,
-            }),
+                upstream_http2: false,
+                upstream_mtls: None,
+            })),
         };
 
         let compiled = CompiledRoute::from_config(&route_config).unwrap();
