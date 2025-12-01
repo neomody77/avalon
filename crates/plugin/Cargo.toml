@@ -1,0 +1,55 @@
+[package]
+name = "plugin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Plugin system for avalon with static and dynamic loading support"
+
+[dependencies]
+# Async
+tokio.workspace = true
+async-trait.workspace = true
+
+# Utilities
+thiserror.workspace = true
+tracing.workspace = true
+parking_lot.workspace = true
+dashmap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+# HTTP types
+bytes.workspace = true
+http.workspace = true
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Auth plugin dependencies
+base64 = "0.22"
+hmac = "0.12"
+sha2 = "0.10"
+
+# Rewrite plugin dependencies
+regex = "1"
+
+# Compression plugin dependencies (optional)
+flate2 = { version = "1", optional = true }
+brotli = { version = "7", optional = true }
+zstd = { version = "0.13", optional = true }
+
+# Dynamic loading (optional)
+libloading = { version = "0.8", optional = true }
+
+# WASM runtime (optional)
+wasmtime = { version = "27", features = ["async", "component-model"], optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+default = []
+dynamic = ["libloading"]
+wasm = ["wasmtime"]
+compression = ["flate2", "brotli", "zstd"]
+full = ["dynamic", "wasm", "compression"]

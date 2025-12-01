@@ -1,0 +1,25 @@
+# avalon example configuration
+
+[global]
+log_level = "info"
+
+[tls]
+email = "admin@example.com"
+acme_enabled = false
+storage_path = "./certs"
+
+[[servers]]
+name = "example"
+listen = [":8080"]
+
+[[servers.routes]]
+[servers.routes.match]
+path = ["/"]
+
+[servers.routes.handle]
+type = "static_response"
+status = 200
+body = "Hello from avalon!"
+
+[servers.routes.handle.headers]
+Content-Type = "text/plain"

@@ -1,12 +1,12 @@
-//! caddy-rs: A Caddy-like web server written in Rust
+//! avalon: A Avalon-like web server written in Rust
 //!
 //! Built on Cloudflare's Pingora framework for high-performance
 //! reverse proxying with automatic HTTPS via Let's Encrypt.
 
 use anyhow::{Context, Result};
-use caddy_core::{Config, HandlerConfig};
-use caddy_proxy::{CaddyProxy, HealthCheckConfig, HealthChecker};
-use caddy_tls::{
+use config::{Config, HandlerConfig};
+use proxy::{AvalonProxy, HealthCheckConfig, HealthChecker, wait_for_connections_drain};
+use tls::{
     AcmeManager, CertStorage, RenewalScheduler, auto_select_certificate, get_acme_ca_name,
     resolve_acme_ca, shutdown_channel,
 };
@@ -21,9 +21,11 @@ use std::time::Duration;
 use tracing::{info, warn, error, Level};
 use tracing_subscriber::FmtSubscriber;
 
+mod telemetry;
+
 #[derive(Parser)]
-#[command(name = "caddy-rs")]
-#[command(author, version, about = "A Caddy-like web server written in Rust")]
+#[command(name = "avalon")]
+#[command(author, version, about = "A Avalon-like web server written in Rust")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -103,13 +105,16 @@ fn main() -> Result<()> {
 
 #[allow(unreachable_code)]
 fn run_server(config_path: PathBuf, watch_config: bool) -> Result<()> {
-    info!("Starting caddy-rs");
+    info!("Starting avalon");
     info!(config = ?config_path, watch = watch_config, "Loading configuration");
 
     let config = Config::load(&config_path)
         .with_context(|| format!("Failed to load config from {:?}", config_path))?;
 
     info!(servers = config.servers.len(), "Configuration loaded");
+
+    // Initialize OpenTelemetry tracing if enabled
+    let telemetry_provider = telemetry::init_telemetry(&config.global.tracing);
 
     // Initialize certificate storage
     let rt = tokio::runtime::Runtime::new()?;
@@ -158,7 +163,7 @@ fn run_server(config_path: PathBuf, watch_config: bool) -> Result<()> {
     server.bootstrap();
 
     // Create proxy service
-    let proxy = CaddyProxy::new(config.clone(), acme_manager.challenge_tokens())
+    let proxy = AvalonProxy::new(config.clone(), acme_manager.challenge_tokens())
         .context("Failed to create proxy")?;
 
     // Add listeners
@@ -269,10 +274,29 @@ fn run_server(config_path: PathBuf, watch_config: bool) -> Result<()> {
 
     // Setup signal handler for graceful shutdown
     let shutdown_tx_clone = shutdown_tx.clone();
+    let grace_period = Duration::from_secs(config.global.grace_period);
     ctrlc::set_handler(move || {
         info!("Received shutdown signal, initiating graceful shutdown...");
+
+        // Notify other components (renewal scheduler, etc.) to stop
         let _ = shutdown_tx_clone.send(true);
+
+        // Wait for active connections to drain (with timeout)
+        info!(grace_period_secs = grace_period.as_secs(), "Waiting for connections to drain...");
+        if wait_for_connections_drain(grace_period) {
+            info!("All connections drained successfully");
+        } else {
+            warn!("Grace period expired, some connections may be terminated");
+        }
+
+        // Exit the process after draining (Pingora will also handle its own cleanup)
+        info!("Shutdown complete");
+        std::process::exit(0);
     }).ok();
+
+    // Store telemetry provider to keep it alive for the duration of the server
+    // It will be automatically shut down when the process exits
+    let _telemetry_guard = telemetry_provider;
 
     // Start config file watcher if enabled
     if watch_config {
@@ -286,7 +310,7 @@ fn run_server(config_path: PathBuf, watch_config: bool) -> Result<()> {
         info!("Config file watcher enabled - changes will trigger auto-reload");
     }
 
-    info!("caddy-rs started successfully");
+    info!("avalon started successfully");
     server.run_forever();
 
     Ok(())
@@ -297,7 +321,7 @@ fn is_tls_address(addr: &str) -> bool {
 }
 
 fn get_tls_cert_paths(
-    tls_config: &caddy_core::TlsConfig,
+    tls_config: &config::TlsConfig,
     domain: &str,
 ) -> Option<(PathBuf, PathBuf)> {
     let storage_path = &tls_config.storage_path;
@@ -366,7 +390,7 @@ fn get_tls_cert_paths(
     None
 }
 
-fn start_health_checkers(config: &Config, proxy: &CaddyProxy) {
+fn start_health_checkers(config: &Config, proxy: &AvalonProxy) {
     for server_config in &config.servers {
         for route in &server_config.routes {
             if let HandlerConfig::ReverseProxy(proxy_config) = &route.handle {
@@ -419,7 +443,7 @@ fn validate_config(config_path: PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn start_config_watcher(config_path: PathBuf, proxy: CaddyProxy) -> Result<()> {
+fn start_config_watcher(config_path: PathBuf, proxy: AvalonProxy) -> Result<()> {
     use notify::event::{EventKind, ModifyKind};
 
     let (tx, rx) = channel();

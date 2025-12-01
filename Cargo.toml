@@ -9,10 +9,10 @@ license = "MIT"
 
 [workspace.dependencies]
 # Internal crates
-caddy-core = { path = "crates/caddy-core" }
-caddy-proxy = { path = "crates/caddy-proxy" }
-caddy-tls = { path = "crates/caddy-tls" }
-caddy-plugin = { path = "crates/caddy-plugin" }
+config = { path = "crates/config" }
+proxy = { path = "crates/proxy" }
+tls = { path = "crates/tls" }
+plugin = { path = "crates/plugin" }
 
 # Pingora
 pingora = { version = "0.6", features = ["lb", "proxy", "openssl"] }
@@ -41,6 +41,10 @@ serde_json = "1"
 # Utilities
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-opentelemetry = "0.27"
+opentelemetry = "0.26"
+opentelemetry_sdk = { version = "0.26", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.26", features = ["tonic"] }
 dashmap = "6"
 notify = "6"
 thiserror = "1"
@@ -58,16 +62,19 @@ reqwest = { version = "0.12", features = ["json"] }
 ctrlc = "3.4"
 
 [package]
-name = "caddy-rs"
+name = "avalon"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "A Caddy-like web server written in Rust, powered by Pingora"
+description = "A high-performance, production-ready reverse proxy server powered by Pingora"
+repository = "https://github.com/example/avalon"
+keywords = ["proxy", "reverse-proxy", "http", "https", "load-balancer"]
+categories = ["network-programming", "web-programming"]
 
 [dependencies]
-caddy-core.workspace = true
-caddy-proxy.workspace = true
-caddy-tls.workspace = true
+config.workspace = true
+proxy.workspace = true
+tls.workspace = true
 
 pingora.workspace = true
 pingora-proxy.workspace = true
@@ -78,5 +85,9 @@ anyhow.workspace = true
 clap.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+tracing-opentelemetry.workspace = true
+opentelemetry.workspace = true
+opentelemetry_sdk.workspace = true
+opentelemetry-otlp.workspace = true
 ctrlc.workspace = true
 notify.workspace = true
