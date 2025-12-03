@@ -49,23 +49,126 @@ impl Default for CompressionConfig {
     }
 }
 
-/// Parse Accept-Encoding header and select best encoding
+/// Parsed encoding with quality factor
+#[derive(Debug, Clone)]
+struct EncodingQuality {
+    encoding: &'static str,
+    quality: f32,
+}
+
+/// Parse Accept-Encoding header and select best encoding according to RFC 7231 Section 5.3.4
 pub fn select_encoding(accept_encoding: Option<&str>, config: &CompressionConfig) -> CompressionEncoding {
     let accept = match accept_encoding {
-        Some(ae) => ae.to_lowercase(),
+        Some(ae) => ae,
         None => return CompressionEncoding::Identity,
     };
 
-    // Priority: brotli > gzip (brotli has better compression ratio)
-    if config.brotli && accept.contains("br") {
-        return CompressionEncoding::Brotli;
+    // Parse all encodings with their quality factors
+    let mut encodings: Vec<EncodingQuality> = Vec::new();
+    let mut wildcard_quality: Option<f32> = None;
+
+    for part in accept.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+
+        let (encoding, quality) = parse_encoding_quality(part);
+        let encoding_lower = encoding.to_lowercase();
+
+        if encoding_lower == "*" {
+            wildcard_quality = Some(quality);
+        } else if encoding_lower == "br" || encoding_lower == "gzip" || encoding_lower == "identity" {
+            encodings.push(EncodingQuality {
+                encoding: match encoding_lower.as_str() {
+                    "br" => "br",
+                    "gzip" => "gzip",
+                    "identity" => "identity",
+                    _ => continue,
+                },
+                quality,
+            });
+        }
     }
 
-    if config.gzip && (accept.contains("gzip") || accept.contains("*")) {
-        return CompressionEncoding::Gzip;
+    // Sort by quality (descending), then by server preference (br > gzip > identity)
+    // Server preference order: br (best compression) > gzip > identity
+    fn encoding_preference(enc: &str) -> u8 {
+        match enc {
+            "br" => 0,      // Most preferred
+            "gzip" => 1,
+            "identity" => 2,
+            _ => 3,
+        }
+    }
+    encodings.sort_by(|a, b| {
+        match b.quality.partial_cmp(&a.quality) {
+            Some(std::cmp::Ordering::Equal) | None => {
+                // When quality is equal, use server preference
+                encoding_preference(a.encoding).cmp(&encoding_preference(b.encoding))
+            }
+            Some(ord) => ord,
+        }
+    });
+
+    // Check if identity is explicitly rejected (q=0)
+    let identity_rejected = encodings.iter().any(|e| e.encoding == "identity" && e.quality == 0.0)
+        || (wildcard_quality == Some(0.0) && !encodings.iter().any(|e| e.encoding == "identity" && e.quality > 0.0));
+
+    // Select best encoding that is enabled and not rejected (q=0)
+    for enc in &encodings {
+        if enc.quality == 0.0 {
+            continue; // Explicitly rejected
+        }
+
+        match enc.encoding {
+            "br" if config.brotli => return CompressionEncoding::Brotli,
+            "gzip" if config.gzip => return CompressionEncoding::Gzip,
+            "identity" => return CompressionEncoding::Identity,
+            _ => continue,
+        }
     }
 
-    CompressionEncoding::Identity
+    // If wildcard is present with quality > 0, use best available encoding
+    if let Some(q) = wildcard_quality {
+        if q > 0.0 {
+            if config.brotli && !encodings.iter().any(|e| e.encoding == "br" && e.quality == 0.0) {
+                return CompressionEncoding::Brotli;
+            }
+            if config.gzip && !encodings.iter().any(|e| e.encoding == "gzip" && e.quality == 0.0) {
+                return CompressionEncoding::Gzip;
+            }
+        }
+    }
+
+    // Default to identity if not rejected
+    if identity_rejected {
+        // Client rejects identity - this is technically a 406 Not Acceptable situation
+        // but we'll return Identity anyway and let the caller decide
+        CompressionEncoding::Identity
+    } else {
+        CompressionEncoding::Identity
+    }
+}
+
+/// Parse encoding and quality factor from a single Accept-Encoding part
+/// Example: "gzip;q=0.8" -> ("gzip", 0.8)
+fn parse_encoding_quality(s: &str) -> (&str, f32) {
+    let parts: Vec<&str> = s.splitn(2, ';').collect();
+    let encoding = parts[0].trim();
+
+    let quality = if parts.len() > 1 {
+        let q_part = parts[1].trim();
+        if let Some(q_str) = q_part.strip_prefix("q=").or_else(|| q_part.strip_prefix("Q=")) {
+            q_str.trim().parse::<f32>().unwrap_or(1.0).clamp(0.0, 1.0)
+        } else {
+            1.0
+        }
+    } else {
+        1.0
+    };
+
+    (encoding, quality)
 }
 
 /// Check if content type should be compressed
@@ -91,14 +194,24 @@ pub fn should_compress_content_type(content_type: Option<&str>) -> bool {
 }
 
 /// Check if response is already compressed
+/// Properly parses Content-Encoding header per RFC 7231 Section 3.1.2.2
 pub fn is_already_compressed(content_encoding: Option<&str>) -> bool {
-    match content_encoding {
-        Some(ce) => {
-            let ce = ce.to_lowercase();
-            ce.contains("gzip") || ce.contains("br") || ce.contains("deflate") || ce.contains("compress")
+    let ce = match content_encoding {
+        Some(ce) => ce,
+        None => return false,
+    };
+
+    // Content-Encoding is a comma-separated list of encodings
+    for encoding in ce.split(',') {
+        let encoding = encoding.trim().to_lowercase();
+        match encoding.as_str() {
+            "gzip" | "x-gzip" | "br" | "deflate" | "compress" | "x-compress" | "zstd" => {
+                return true;
+            }
+            _ => continue,
         }
-        None => false,
     }
+    false
 }
 
 /// Compress data using gzip
@@ -229,6 +342,57 @@ mod tests {
     }
 
     #[test]
+    fn test_select_encoding_quality_factors() {
+        let config = CompressionConfig::default();
+
+        // Prefer gzip when it has higher quality
+        let encoding = select_encoding(Some("gzip;q=1.0, br;q=0.5"), &config);
+        assert_eq!(encoding, CompressionEncoding::Gzip);
+
+        // Prefer brotli when it has higher quality
+        let encoding = select_encoding(Some("gzip;q=0.5, br;q=1.0"), &config);
+        assert_eq!(encoding, CompressionEncoding::Brotli);
+
+        // Reject gzip with q=0
+        let config_gzip_only = CompressionConfig {
+            brotli: false,
+            ..Default::default()
+        };
+        let encoding = select_encoding(Some("gzip;q=0"), &config_gzip_only);
+        assert_eq!(encoding, CompressionEncoding::Identity);
+    }
+
+    #[test]
+    fn test_select_encoding_wildcard() {
+        let config = CompressionConfig::default();
+
+        // Wildcard should select best available
+        let encoding = select_encoding(Some("*"), &config);
+        assert_eq!(encoding, CompressionEncoding::Brotli);
+
+        // Wildcard with br explicitly rejected
+        let encoding = select_encoding(Some("*, br;q=0"), &config);
+        assert_eq!(encoding, CompressionEncoding::Gzip);
+
+        // Wildcard q=0 rejects all not explicitly listed
+        let encoding = select_encoding(Some("*;q=0, gzip;q=1.0"), &config);
+        assert_eq!(encoding, CompressionEncoding::Gzip);
+    }
+
+    #[test]
+    fn test_select_encoding_identity_rejected() {
+        let config = CompressionConfig {
+            gzip: false,
+            brotli: false,
+            ..Default::default()
+        };
+
+        // Even with identity rejected, we return Identity (caller handles 406)
+        let encoding = select_encoding(Some("identity;q=0"), &config);
+        assert_eq!(encoding, CompressionEncoding::Identity);
+    }
+
+    #[test]
     fn test_should_compress_content_type() {
         assert!(should_compress_content_type(Some("text/html")));
         assert!(should_compress_content_type(Some("application/json")));
@@ -247,7 +411,11 @@ mod tests {
         assert!(is_already_compressed(Some("gzip")));
         assert!(is_already_compressed(Some("br")));
         assert!(is_already_compressed(Some("deflate")));
+        assert!(is_already_compressed(Some("zstd")));
+        assert!(is_already_compressed(Some("x-gzip")));
+        assert!(is_already_compressed(Some("gzip, br"))); // Multiple encodings
         assert!(!is_already_compressed(Some("identity")));
+        assert!(!is_already_compressed(Some("chunked"))); // Transfer-Encoding, not Content-Encoding
         assert!(!is_already_compressed(None));
     }
 

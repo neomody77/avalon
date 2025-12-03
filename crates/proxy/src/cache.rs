@@ -253,12 +253,24 @@ impl ResponseCache {
             return false;
         }
 
-        // Check Cache-Control header
+        // Check Cache-Control header per RFC 7234
         for (name, value) in headers {
             if name.eq_ignore_ascii_case("cache-control") {
-                let directives: Vec<&str> = value.split(',').map(|s| s.trim().to_lowercase()).map(|s| s.leak() as &str).collect();
-                if directives.iter().any(|d| *d == "no-store" || *d == "private") {
-                    return false;
+                for directive in value.split(',') {
+                    let directive = directive.trim().to_lowercase();
+                    // Extract directive name (before '=') for directives with values
+                    let directive_name = directive.split('=').next().unwrap_or(&directive);
+
+                    match directive_name {
+                        // RFC 7234 Section 5.2.2.3: no-store - don't cache at all
+                        "no-store" => return false,
+                        // RFC 7234 Section 5.2.2.6: private - only for single user, not shared cache
+                        "private" => return false,
+                        // RFC 7234 Section 5.2.2.2: no-cache - can store but must revalidate
+                        // For simplicity, we treat this as non-cacheable
+                        "no-cache" => return false,
+                        _ => {}
+                    }
                 }
             }
         }

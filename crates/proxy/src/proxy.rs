@@ -160,6 +160,35 @@ impl Default for RequestCtx {
     }
 }
 
+/// Merge a value into the Vary header (RFC 7231 Section 7.1.4)
+/// If the header already exists, append the new value; otherwise set it
+fn merge_vary_header(response: &mut ResponseHeader, value: &str) -> Result<()> {
+    if let Some(existing) = response.headers.get("vary") {
+        if let Ok(existing_str) = existing.to_str() {
+            // Check if value is already present (case-insensitive)
+            let existing_lower = existing_str.to_lowercase();
+            let value_lower = value.to_lowercase();
+            let already_present = existing_lower
+                .split(',')
+                .any(|v| v.trim() == value_lower);
+
+            if !already_present {
+                let new_value = format!("{}, {}", existing_str, value);
+                response.insert_header("Vary", new_value)?;
+            }
+        }
+    } else {
+        response.insert_header("Vary", value)?;
+    }
+    Ok(())
+}
+
+/// Check if status code allows a message body (RFC 7230 Section 3.3.3)
+/// Returns false for 1xx, 204, and 304 responses
+fn status_allows_body(status: u16) -> bool {
+    !(status < 200 || status == 204 || status == 304)
+}
+
 /// Main Avalon proxy implementation
 pub struct AvalonProxy {
     routing: Arc<RoutingContext>,
@@ -702,6 +731,8 @@ impl ProxyHttp for AvalonProxy {
                         let status = StatusCode::from_u16(code).unwrap_or(StatusCode::FOUND);
                         let mut header = ResponseHeader::build(status, None)?;
                         header.insert_header("Location", location)?;
+                        // RFC 7230: Redirect responses should include Content-Length: 0
+                        header.insert_header("Content-Length", "0")?;
 
                         session.write_response_header(Box::new(header), true).await?;
                         return Ok(true);
@@ -1057,12 +1088,13 @@ impl ProxyHttp for AvalonProxy {
             upstream_request.insert_header("X-Forwarded-Host", host)?;
         }
 
-        // Add X-Forwarded-Proto (TODO: detect TLS from session)
-        let proto = if ctx.upstream.as_ref().is_some_and(|u| u.use_tls) {
-            "https"
-        } else {
-            "http"
-        };
+        // Add X-Forwarded-Proto based on client connection (not upstream)
+        // Check if the downstream (client) connection is TLS by inspecting ssl_digest
+        let client_is_tls = session
+            .digest()
+            .map(|d| d.ssl_digest.is_some())
+            .unwrap_or(false);
+        let proto = if client_is_tls { "https" } else { "http" };
         upstream_request.insert_header("X-Forwarded-Proto", proto)?;
 
         // Add custom upstream headers from config
@@ -1144,7 +1176,12 @@ impl ProxyHttp for AvalonProxy {
         if let Some(cors) = &ctx.cors {
             if let Some(cors_headers) = cors.response_headers(ctx.request_origin.as_deref()) {
                 for (name, value) in cors_headers {
-                    upstream_response.insert_header(name, value)?;
+                    // Use merge for Vary header to avoid overwriting existing values
+                    if name.eq_ignore_ascii_case("Vary") {
+                        merge_vary_header(upstream_response, &value)?;
+                    } else {
+                        upstream_response.insert_header(name, value)?;
+                    }
                 }
                 debug!("CORS headers added to response");
             }
@@ -1228,11 +1265,27 @@ impl ProxyHttp for AvalonProxy {
             }
         }
 
+        // Check if content type is compressible
+        let is_compressible_type = should_compress_content_type(content_type.as_deref());
+
+        // RFC 7231 Section 7.1.4: Always add Vary: Accept-Encoding when:
+        // 1. Content type is compressible, AND
+        // 2. Client sent Accept-Encoding header (compression_encoding != Identity means client accepts compression)
+        // This is important for caching proxies even if we don't actually compress
+        if is_compressible_type
+            && ctx.compression_encoding != CompressionEncoding::Identity
+            && status_allows_body(ctx.response_status)
+        {
+            merge_vary_header(upstream_response, "Accept-Encoding")?;
+        }
+
         // Determine if we should compress this response
+        // RFC 7230 Section 3.3.3: 1xx, 204, 304 responses MUST NOT contain a message body
         let should_compress = ctx.compression_encoding != CompressionEncoding::Identity
             && !ctx.response_already_compressed
             && !ctx.is_websocket
-            && should_compress_content_type(content_type.as_deref());
+            && is_compressible_type
+            && status_allows_body(ctx.response_status);
 
         // Check Content-Length to skip compression for small responses
         // This prevents the "invalid header" error when we set Content-Encoding
@@ -1255,8 +1308,6 @@ impl ProxyHttp for AvalonProxy {
             upstream_response.insert_header("Transfer-Encoding", "chunked")?;
             // Set Content-Encoding header
             upstream_response.insert_header("Content-Encoding", ctx.compression_encoding.header_value())?;
-            // Add Vary header to indicate content varies by Accept-Encoding
-            upstream_response.insert_header("Vary", "Accept-Encoding")?;
 
             debug!(
                 encoding = %ctx.compression_encoding.header_value(),
