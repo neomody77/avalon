@@ -11,6 +11,9 @@ rustls.workspace = true
 rustls-pemfile.workspace = true
 tokio-rustls.workspace = true
 rcgen.workspace = true
+anyhow.workspace = true
+pingora-core = { workspace = true }
+openssl = "0.10"
 
 tokio.workspace = true
 async-trait.workspace = true

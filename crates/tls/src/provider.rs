@@ -48,6 +48,16 @@ impl CertResolver {
         debug!("Default certificate set");
     }
 
+    /// Get the number of loaded certificates
+    pub fn domain_count(&self) -> usize {
+        self.certs.read().len()
+    }
+
+    /// Check if a default certificate is set
+    pub fn has_default(&self) -> bool {
+        self.default_cert.read().is_some()
+    }
+
     /// Load certificate from PEM files
     pub fn load_from_pem(cert_pem: &str, key_pem: &str) -> Result<Arc<CertifiedKey>, TlsError> {
         let certs = certs(&mut BufReader::new(cert_pem.as_bytes()))

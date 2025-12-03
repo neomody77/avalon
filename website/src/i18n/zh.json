@@ -14,7 +14,8 @@
       "getting-started": "快速入门",
       "configuration": "配置参考",
       "examples": "示例",
-      "rhai": "Rhai 脚本"
+      "rhai": "Rhai 脚本",
+      "llm": "LLM 友好版"
     }
   },
   "hero": {

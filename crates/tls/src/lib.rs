@@ -6,15 +6,19 @@
 pub mod acme;
 pub mod cloudflare;
 pub mod error;
+pub mod listener;
 pub mod provider;
 pub mod renewal;
 pub mod self_signed;
+pub mod sni;
 pub mod storage;
 
 pub use acme::{AcmeManager, ChallengeTokens};
 pub use error::TlsError;
+pub use listener::{SniTlsSettings, load_all_domain_certs};
 pub use provider::{load_certs_from_storage, CertResolver};
 pub use renewal::{RenewalScheduler, shutdown_channel};
+pub use sni::{SniResolver, load_all_certs};
 pub use storage::{
     CertStorage, DiscoveredCert, auto_select_certificate, discover_certificates,
     find_best_cert_for_domain,

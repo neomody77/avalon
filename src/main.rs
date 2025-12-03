@@ -7,12 +7,13 @@ use anyhow::{Context, Result};
 use config::{Config, HandlerConfig};
 use proxy::{AvalonProxy, HealthCheckConfig, HealthChecker, wait_for_connections_drain};
 use tls::{
-    AcmeManager, CertStorage, RenewalScheduler, auto_select_certificate, get_acme_ca_name,
-    resolve_acme_ca, shutdown_channel,
+    AcmeManager, CertStorage, RenewalScheduler, SniResolver, auto_select_certificate,
+    get_acme_ca_name, load_all_certs, resolve_acme_ca, shutdown_channel,
 };
 use clap::{Parser, Subcommand};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher, Config as NotifyConfig};
 use pingora::prelude::*;
+use pingora_core::listeners::tls::TlsSettings;
 use pingora_proxy::http_proxy_service;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -166,6 +167,21 @@ fn run_server(config_path: PathBuf, watch_config: bool) -> Result<()> {
     let proxy = AvalonProxy::new(config.clone(), acme_manager.challenge_tokens())
         .context("Failed to create proxy")?;
 
+    // Setup SNI resolver for multi-domain TLS support
+    let domains = config.get_tls_domains();
+    let sni_resolver = Arc::new(SniResolver::new());
+
+    info!(domains = ?domains, storage_path = ?config.tls.storage_path, "Setting up SNI resolver");
+    if !domains.is_empty() {
+        info!(domains = ?domains, "Loading certificates for SNI");
+        rt.block_on(async {
+            if let Err(e) = load_all_certs(&sni_resolver, &storage, &domains, &config.tls.storage_path).await {
+                warn!(error = %e, "Failed to load some certificates for SNI");
+            }
+        });
+        info!(loaded_count = sni_resolver.domain_count(), "SNI certificates loaded");
+    }
+
     // Add listeners
     for server_config in &config.servers {
         for listen_addr in &server_config.listen {
@@ -179,29 +195,27 @@ fn run_server(config_path: PathBuf, watch_config: bool) -> Result<()> {
 
             // Check for TLS listener
             if is_tls_address(listen_addr) {
-                let domains = config.get_tls_domains();
-                info!(domains = ?domains, "TLS domains found");
-                let first_domain = domains.first().cloned().unwrap_or_else(|| "localhost".to_string());
-                info!(domain = %first_domain, storage_path = ?config.tls.storage_path, "Looking for certificate");
-
-                if let Some((cert_path, key_path)) = get_tls_cert_paths(&config.tls, &first_domain) {
-                    let cert_str = cert_path.to_str().unwrap_or("");
-                    let key_str = key_path.to_str().unwrap_or("");
-
-                    match service.add_tls(&addr, cert_str, key_str) {
-                        Ok(_) => {
-                            info!(address = %addr, domain = %first_domain, "Listening (HTTPS)");
+                // Use SNI-based TLS if we have multiple domains or if callbacks are preferred
+                if sni_resolver.domain_count() > 0 {
+                    // Use SNI callback for multi-certificate support
+                    match TlsSettings::with_callbacks(Box::new(sni_resolver.as_ref().clone())) {
+                        Ok(tls_settings) => {
+                            service.add_tls_with_settings(&addr, None, tls_settings);
+                            info!(
+                                address = %addr,
+                                domains = sni_resolver.domain_count(),
+                                "Listening (HTTPS with SNI)"
+                            );
                         }
                         Err(e) => {
-                            warn!(address = %addr, error = %e, "TLS failed, using HTTP");
-                            service.add_tcp(&addr);
-                            info!(address = %addr, "Listening (HTTP)");
+                            warn!(address = %addr, error = %e, "SNI TLS setup failed, falling back to single cert");
+                            // Fallback to single certificate
+                            fallback_single_cert_tls(&mut service, &addr, &config, &domains);
                         }
                     }
                 } else {
-                    warn!(address = %addr, "No certificate, using HTTP");
-                    service.add_tcp(&addr);
-                    info!(address = %addr, "Listening (HTTP)");
+                    // Fallback to single certificate mode
+                    fallback_single_cert_tls(&mut service, &addr, &config, &domains);
                 }
             } else {
                 service.add_tcp(&addr);
@@ -251,6 +265,7 @@ fn run_server(config_path: PathBuf, watch_config: bool) -> Result<()> {
     if config.tls.acme_enabled && !domains.is_empty() {
         let acme_manager_renewal = acme_manager.clone();
         let storage_renewal = storage.clone();
+        let sni_resolver_renewal = sni_resolver.clone();
         std::thread::spawn(move || {
             let rt = match tokio::runtime::Runtime::new() {
                 Ok(rt) => rt,
@@ -265,7 +280,8 @@ fn run_server(config_path: PathBuf, watch_config: bool) -> Result<()> {
                     storage_renewal,
                     domains,
                     shutdown_rx,
-                );
+                )
+                .with_sni_resolver(sni_resolver_renewal);
                 info!("Starting certificate renewal scheduler");
                 scheduler.start().await.ok();
             });
@@ -302,8 +318,15 @@ fn run_server(config_path: PathBuf, watch_config: bool) -> Result<()> {
     if watch_config {
         let proxy_for_reload = proxy.clone();
         let config_path_for_watch = config_path.clone();
+        let sni_resolver_for_watch = sni_resolver.clone();
+        let storage_for_watch = storage.clone();
         std::thread::spawn(move || {
-            if let Err(e) = start_config_watcher(config_path_for_watch, proxy_for_reload) {
+            if let Err(e) = start_config_watcher(
+                config_path_for_watch,
+                proxy_for_reload,
+                sni_resolver_for_watch,
+                storage_for_watch,
+            ) {
                 error!(error = %e, "Config watcher failed");
             }
         });
@@ -318,6 +341,39 @@ fn run_server(config_path: PathBuf, watch_config: bool) -> Result<()> {
 
 fn is_tls_address(addr: &str) -> bool {
     addr.contains(":443") || addr.starts_with("https://")
+}
+
+/// Fallback to single certificate TLS when SNI is not available
+fn fallback_single_cert_tls<A>(
+    service: &mut pingora_core::services::listening::Service<A>,
+    addr: &str,
+    config: &Config,
+    domains: &[String],
+) where
+    A: pingora_core::apps::ServerApp + Send + Sync + 'static,
+{
+    let first_domain = domains.first().cloned().unwrap_or_else(|| "localhost".to_string());
+    info!(domain = %first_domain, storage_path = ?config.tls.storage_path, "Looking for certificate");
+
+    if let Some((cert_path, key_path)) = get_tls_cert_paths(&config.tls, &first_domain) {
+        let cert_str = cert_path.to_str().unwrap_or("");
+        let key_str = key_path.to_str().unwrap_or("");
+
+        match service.add_tls(addr, cert_str, key_str) {
+            Ok(_) => {
+                info!(address = %addr, domain = %first_domain, "Listening (HTTPS)");
+            }
+            Err(e) => {
+                warn!(address = %addr, error = %e, "TLS failed, using HTTP");
+                service.add_tcp(addr);
+                info!(address = %addr, "Listening (HTTP)");
+            }
+        }
+    } else {
+        warn!(address = %addr, "No certificate, using HTTP");
+        service.add_tcp(addr);
+        info!(address = %addr, "Listening (HTTP)");
+    }
 }
 
 fn get_tls_cert_paths(
@@ -443,7 +499,12 @@ fn validate_config(config_path: PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn start_config_watcher(config_path: PathBuf, proxy: AvalonProxy) -> Result<()> {
+fn start_config_watcher(
+    config_path: PathBuf,
+    proxy: AvalonProxy,
+    sni_resolver: Arc<SniResolver>,
+    storage: Arc<CertStorage>,
+) -> Result<()> {
     use notify::event::{EventKind, ModifyKind};
 
     let (tx, rx) = channel();
@@ -461,6 +522,10 @@ fn start_config_watcher(config_path: PathBuf, proxy: AvalonProxy) -> Result<()> 
 
     let mut last_reload = std::time::Instant::now();
     let debounce_duration = Duration::from_millis(500);
+
+    // Create a tokio runtime for async cert loading
+    let rt = tokio::runtime::Runtime::new()
+        .context("Failed to create tokio runtime for config watcher")?;
 
     loop {
         match rx.recv() {
@@ -486,9 +551,19 @@ fn start_config_watcher(config_path: PathBuf, proxy: AvalonProxy) -> Result<()> 
 
                     match Config::load(&config_path) {
                         Ok(new_config) => {
-                            match proxy.reload_config(new_config) {
-                                Ok(_) => info!("Configuration reloaded successfully"),
+                            // Reload proxy configuration
+                            match proxy.reload_config(new_config.clone()) {
+                                Ok(_) => info!("Proxy configuration reloaded successfully"),
                                 Err(e) => error!(error = %e, "Failed to apply new configuration"),
+                            }
+
+                            // Reload TLS certificates
+                            let domains = new_config.get_tls_domains();
+                            if !domains.is_empty() {
+                                info!(domains = ?domains, "Reloading TLS certificates...");
+                                rt.block_on(async {
+                                    reload_certificates(&sni_resolver, &storage, &domains).await;
+                                });
                             }
                         }
                         Err(e) => {
@@ -508,4 +583,37 @@ fn start_config_watcher(config_path: PathBuf, proxy: AvalonProxy) -> Result<()> 
     }
 
     Ok(())
+}
+
+/// Reload certificates from storage into the SNI resolver
+async fn reload_certificates(
+    sni_resolver: &SniResolver,
+    storage: &CertStorage,
+    domains: &[String],
+) {
+    for domain in domains {
+        match storage.load_cert(domain).await {
+            Ok(Some(bundle)) => {
+                match SniResolver::load_from_pem(
+                    bundle.certificate_pem.as_bytes(),
+                    bundle.private_key_pem.as_bytes(),
+                ) {
+                    Ok(pair) => {
+                        sni_resolver.add_cert(domain, pair);
+                        info!(domain = %domain, "Certificate reloaded");
+                    }
+                    Err(e) => {
+                        error!(domain = %domain, error = %e, "Failed to parse certificate");
+                    }
+                }
+            }
+            Ok(None) => {
+                warn!(domain = %domain, "No certificate found in storage");
+            }
+            Err(e) => {
+                error!(domain = %domain, error = %e, "Failed to load certificate");
+            }
+        }
+    }
+    info!("TLS certificates reload completed");
 }

@@ -3,6 +3,7 @@
 //! Periodically checks certificates and renews them before expiration.
 
 use crate::acme::AcmeManager;
+use crate::sni::SniResolver;
 use crate::storage::CertStorage;
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,6 +20,7 @@ const DEFAULT_RENEWAL_DAYS: i64 = 30;
 pub struct RenewalScheduler {
     acme_manager: Arc<AcmeManager>,
     storage: Arc<CertStorage>,
+    sni_resolver: Option<Arc<SniResolver>>,
     domains: Vec<String>,
     check_interval: Duration,
     renewal_days: i64,
@@ -36,11 +38,18 @@ impl RenewalScheduler {
         Self {
             acme_manager,
             storage,
+            sni_resolver: None,
             domains,
             check_interval: Duration::from_secs(DEFAULT_CHECK_INTERVAL_HOURS * 3600),
             renewal_days: DEFAULT_RENEWAL_DAYS,
             shutdown_rx,
         }
+    }
+
+    /// Set the SNI resolver for hot-reloading certificates
+    pub fn with_sni_resolver(mut self, resolver: Arc<SniResolver>) -> Self {
+        self.sni_resolver = Some(resolver);
+        self
     }
 
     /// Set custom check interval
@@ -105,6 +114,8 @@ impl RenewalScheduler {
                         match self.acme_manager.obtain_certificate(domain).await {
                             Ok(_) => {
                                 info!(domain = %domain, "Certificate renewed successfully");
+                                // Hot-reload the certificate into SNI resolver
+                                self.reload_cert_to_sni(domain).await;
                             }
                             Err(e) => {
                                 error!(
@@ -129,7 +140,11 @@ impl RenewalScheduler {
                         "No certificate found, attempting to obtain"
                     );
                     match self.acme_manager.obtain_certificate(domain).await {
-                        Ok(_) => info!(domain = %domain, "Certificate obtained"),
+                        Ok(_) => {
+                            info!(domain = %domain, "Certificate obtained");
+                            // Hot-reload the certificate into SNI resolver
+                            self.reload_cert_to_sni(domain).await;
+                        }
                         Err(e) => error!(domain = %domain, error = %e, "Failed to obtain certificate"),
                     }
                 }
@@ -140,6 +155,38 @@ impl RenewalScheduler {
                         "Failed to load certificate"
                     );
                 }
+            }
+        }
+    }
+
+    /// Reload a certificate into the SNI resolver after renewal
+    async fn reload_cert_to_sni(&self, domain: &str) {
+        let Some(resolver) = &self.sni_resolver else {
+            debug!(domain = %domain, "No SNI resolver configured, skipping hot-reload");
+            return;
+        };
+
+        // Load the renewed certificate from storage
+        match self.storage.load_cert(domain).await {
+            Ok(Some(bundle)) => {
+                match SniResolver::load_from_pem(
+                    bundle.certificate_pem.as_bytes(),
+                    bundle.private_key_pem.as_bytes(),
+                ) {
+                    Ok(pair) => {
+                        resolver.add_cert(domain, pair);
+                        info!(domain = %domain, "Certificate hot-reloaded into SNI resolver");
+                    }
+                    Err(e) => {
+                        error!(domain = %domain, error = %e, "Failed to parse renewed certificate");
+                    }
+                }
+            }
+            Ok(None) => {
+                error!(domain = %domain, "Certificate not found after renewal");
+            }
+            Err(e) => {
+                error!(domain = %domain, error = %e, "Failed to load renewed certificate");
             }
         }
     }

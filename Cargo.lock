@@ -270,6 +270,7 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "pingora",
+ "pingora-core",
  "pingora-proxy",
  "proxy",
  "rustls",
@@ -3638,13 +3639,16 @@ dependencies = [
 name = "tls"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "base64 0.22.1",
  "chrono",
  "dashmap",
  "instant-acme",
+ "openssl",
  "parking_lot",
  "pem",
+ "pingora-core",
  "rcgen",
  "rustls",
  "rustls-pemfile",

@@ -811,6 +811,7 @@ impl ProxyHttp for AvalonProxy {
                     idle: Duration::from_secs(timeouts.keepalive_interval),
                     interval: Duration::from_secs(timeouts.keepalive_interval),
                     count: timeouts.keepalive_count as usize,
+                    #[cfg(target_os = "linux")]
                     user_timeout: Duration::from_secs(0),
                 });
             }
@@ -1233,9 +1234,25 @@ impl ProxyHttp for AvalonProxy {
             && !ctx.is_websocket
             && should_compress_content_type(content_type.as_deref());
 
-        if should_compress {
+        // Check Content-Length to skip compression for small responses
+        // This prevents the "invalid header" error when we set Content-Encoding
+        // but the body is too small to actually compress
+        let content_length = upstream_response.headers
+            .get("content-length")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<usize>().ok());
+
+        // Only skip compression if we KNOW the size is too small
+        // For chunked/streaming responses (no Content-Length), we always try to compress
+        let skip_due_to_size = content_length
+            .map(|len| len < self.compression_config.min_size)
+            .unwrap_or(false);
+
+        if should_compress && !skip_due_to_size {
             // Remove Content-Length as it will change after compression
             upstream_response.remove_header("content-length");
+            // Set Transfer-Encoding: chunked since we don't know the compressed size yet
+            upstream_response.insert_header("Transfer-Encoding", "chunked")?;
             // Set Content-Encoding header
             upstream_response.insert_header("Content-Encoding", ctx.compression_encoding.header_value())?;
             // Add Vary header to indicate content varies by Accept-Encoding
@@ -1244,7 +1261,16 @@ impl ProxyHttp for AvalonProxy {
             debug!(
                 encoding = %ctx.compression_encoding.header_value(),
                 content_type = ?content_type,
+                content_length = ?content_length,
                 "Response will be compressed"
+            );
+        } else if should_compress && skip_due_to_size {
+            // Reset compression encoding since we won't compress
+            ctx.compression_encoding = CompressionEncoding::Identity;
+            debug!(
+                content_length = ?content_length,
+                min_size = self.compression_config.min_size,
+                "Skipping compression: response too small"
             );
         }
 
@@ -1311,13 +1337,9 @@ impl ProxyHttp for AvalonProxy {
             }
 
             // Apply compression if needed
+            // Note: Size check was already done in upstream_response_filter based on Content-Length
+            // If we're here with should_compress=true, we should always compress
             if should_compress {
-                // Skip compression if body is too small
-                if ctx.response_body_buffer.len() < self.compression_config.min_size {
-                    *body = Some(Bytes::copy_from_slice(&ctx.response_body_buffer));
-                    return Ok(None);
-                }
-
                 // Compress the body
                 match compress(&ctx.response_body_buffer, ctx.compression_encoding, self.compression_config.level) {
                     Ok(compressed) => {

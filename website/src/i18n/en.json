@@ -14,7 +14,8 @@
       "getting-started": "Getting Started",
       "configuration": "Configuration",
       "examples": "Examples",
-      "rhai": "Rhai Scripting"
+      "rhai": "Rhai Scripting",
+      "llm": "LLM-Friendly"
     }
   },
   "hero": {

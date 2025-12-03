@@ -77,6 +77,7 @@ proxy.workspace = true
 tls.workspace = true
 
 pingora.workspace = true
+pingora-core.workspace = true
 pingora-proxy.workspace = true
 rustls.workspace = true
 
