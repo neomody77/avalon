@@ -189,6 +189,46 @@ fn status_allows_body(status: u16) -> bool {
     !(status < 200 || status == 204 || status == 304)
 }
 
+/// Add security headers to response based on configuration
+fn add_security_headers(response: &mut ResponseHeader, config: &config::SecurityHeadersConfig, is_tls: bool) -> Result<()> {
+    if !config.enabled {
+        return Ok(());
+    }
+
+    // HSTS should only be added on HTTPS connections
+    if is_tls {
+        if let Some(ref hsts) = config.hsts {
+            response.insert_header("Strict-Transport-Security", hsts.clone())?;
+        }
+    }
+
+    if let Some(ref xfo) = config.x_frame_options {
+        response.insert_header("X-Frame-Options", xfo.clone())?;
+    }
+
+    if let Some(ref xcto) = config.x_content_type_options {
+        response.insert_header("X-Content-Type-Options", xcto.clone())?;
+    }
+
+    if let Some(ref xxp) = config.x_xss_protection {
+        response.insert_header("X-XSS-Protection", xxp.clone())?;
+    }
+
+    if let Some(ref csp) = config.content_security_policy {
+        response.insert_header("Content-Security-Policy", csp.clone())?;
+    }
+
+    if let Some(ref rp) = config.referrer_policy {
+        response.insert_header("Referrer-Policy", rp.clone())?;
+    }
+
+    if let Some(ref pp) = config.permissions_policy {
+        response.insert_header("Permissions-Policy", pp.clone())?;
+    }
+
+    Ok(())
+}
+
 /// Main Avalon proxy implementation
 pub struct AvalonProxy {
     routing: Arc<RoutingContext>,
@@ -364,7 +404,35 @@ impl ProxyHttp for AvalonProxy {
         session: &mut Session,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
-        let path = session.req_header().uri.path();
+        let req_header = session.req_header();
+        let path = req_header.uri.path();
+
+        // RFC 7230 Section 5.4: HTTP/1.1 requests MUST include exactly one Host header
+        // Check for duplicate Host headers (should return 400)
+        let host_headers: Vec<_> = req_header.headers.get_all("host").iter().collect();
+        if host_headers.len() > 1 {
+            warn!("Request contains duplicate Host headers");
+            return Err(pingora_core::Error::new(pingora_core::ErrorType::HTTPStatus(400)));
+        }
+
+        // HTTP/1.1 requests without Host header should return 400
+        // Note: HTTP/1.0 doesn't require Host header
+        let version = &req_header.version;
+        if *version == http::Version::HTTP_11 && host_headers.is_empty() {
+            warn!("HTTP/1.1 request missing Host header");
+            return Err(pingora_core::Error::new(pingora_core::ErrorType::HTTPStatus(400)));
+        }
+
+        // RFC 7230 Section 3.3.2: Reject negative Content-Length
+        if let Some(content_length) = req_header.headers.get("content-length") {
+            if let Ok(cl_str) = content_length.to_str() {
+                // Check if it starts with a minus sign or fails to parse as u64
+                if cl_str.starts_with('-') || cl_str.parse::<u64>().is_err() {
+                    warn!(content_length = %cl_str, "Invalid Content-Length header");
+                    return Err(pingora_core::Error::new(pingora_core::ErrorType::HTTPStatus(400)));
+                }
+            }
+        }
 
         if let Some(response) = self.check_acme_challenge(path) {
             ctx.is_acme_challenge = true;
@@ -742,20 +810,61 @@ impl ProxyHttp for AvalonProxy {
                             .with_browse(config.browse)
                             .with_index_files(config.index.clone());
 
-                        let response = file_server.serve(path).await;
+                        // Use serve_request to validate HTTP method
+                        let response = file_server.serve_request(method, path).await;
 
                         let mut header = ResponseHeader::build(response.status, None)?;
                         header.insert_header("Content-Type", response.content_type.clone())?;
-                        header.insert_header("Content-Length", response.body.len().to_string())?;
                         header.insert_header("Server", "avalon")?;
 
+                        // Add response headers from file server (ETag, Last-Modified, etc.)
                         for (key, value) in &response.headers {
                             header.insert_header(key.clone(), value.clone())?;
                         }
 
-                        session.write_response_header(Box::new(header), response.body.is_empty()).await?;
-                        if !response.body.is_empty() {
-                            session.write_response_body(Some(response.body), true).await?;
+                        // Check if compression is enabled and applicable
+                        let should_compress = config.compress
+                            && ctx.compression_encoding != CompressionEncoding::Identity
+                            && should_compress_content_type(Some(&response.content_type))
+                            && response.body.len() >= self.compression_config.min_size
+                            && response.status == StatusCode::OK;
+
+                        // RFC 7231: Add Vary: Accept-Encoding for compressible content types
+                        if should_compress_content_type(Some(&response.content_type))
+                            && ctx.compression_encoding != CompressionEncoding::Identity
+                        {
+                            merge_vary_header(&mut header, "Accept-Encoding")?;
+                        }
+
+                        // For HEAD requests, don't send body but include Content-Length
+                        let is_head = method == "HEAD";
+                        if is_head {
+                            header.insert_header("Content-Length", response.body.len().to_string())?;
+                            session.write_response_header(Box::new(header), true).await?;
+                        } else if should_compress {
+                            // Compress the response body
+                            match compress(&response.body, ctx.compression_encoding, self.compression_config.level) {
+                                Ok(compressed) => {
+                                    header.insert_header("Content-Encoding", ctx.compression_encoding.header_value())?;
+                                    header.insert_header("Content-Length", compressed.len().to_string())?;
+                                    session.write_response_header(Box::new(header), false).await?;
+                                    session.write_response_body(Some(compressed), true).await?;
+                                }
+                                Err(_) => {
+                                    // Compression failed, send uncompressed
+                                    header.insert_header("Content-Length", response.body.len().to_string())?;
+                                    session.write_response_header(Box::new(header), response.body.is_empty()).await?;
+                                    if !response.body.is_empty() {
+                                        session.write_response_body(Some(response.body), true).await?;
+                                    }
+                                }
+                            }
+                        } else {
+                            header.insert_header("Content-Length", response.body.len().to_string())?;
+                            session.write_response_header(Box::new(header), response.body.is_empty()).await?;
+                            if !response.body.is_empty() {
+                                session.write_response_body(Some(response.body), true).await?;
+                            }
                         }
 
                         return Ok(true);
@@ -1157,7 +1266,7 @@ impl ProxyHttp for AvalonProxy {
 
     async fn response_filter(
         &self,
-        _session: &mut Session,
+        session: &mut Session,
         upstream_response: &mut ResponseHeader,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
@@ -1171,6 +1280,15 @@ impl ProxyHttp for AvalonProxy {
         }
 
         upstream_response.insert_header("Server", "avalon")?;
+
+        // Add security headers based on global configuration
+        let config = self.config.read();
+        let is_tls = session
+            .digest()
+            .map(|d| d.ssl_digest.is_some())
+            .unwrap_or(false);
+        add_security_headers(upstream_response, &config.global.security_headers, is_tls)?;
+        drop(config);
 
         // Add CORS headers to response if configured
         if let Some(cors) = &ctx.cors {

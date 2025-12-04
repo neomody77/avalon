@@ -3,8 +3,12 @@
 use bytes::Bytes;
 use http::StatusCode;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 use tokio::fs;
 use tracing::debug;
+
+/// Allowed HTTP methods for file server (RFC 7231)
+const ALLOWED_METHODS: &[&str] = &["GET", "HEAD", "OPTIONS"];
 
 /// File server response
 pub struct FileResponse {
@@ -38,6 +42,38 @@ impl FileServer {
     pub fn with_index_files(mut self, files: Vec<String>) -> Self {
         self.index_files = files;
         self
+    }
+
+    /// Serve a request with method validation
+    pub async fn serve_request(&self, method: &str, path: &str) -> FileResponse {
+        let method_upper = method.to_uppercase();
+
+        // RFC 7231: Only allow safe methods for static file serving
+        if !ALLOWED_METHODS.contains(&method_upper.as_str()) {
+            return FileResponse {
+                status: StatusCode::METHOD_NOT_ALLOWED,
+                content_type: "text/plain".to_string(),
+                body: Bytes::from("405 Method Not Allowed"),
+                headers: vec![
+                    ("Allow".to_string(), ALLOWED_METHODS.join(", ")),
+                ],
+            };
+        }
+
+        // Handle OPTIONS request
+        if method_upper == "OPTIONS" {
+            return FileResponse {
+                status: StatusCode::NO_CONTENT,
+                content_type: "text/plain".to_string(),
+                body: Bytes::new(),
+                headers: vec![
+                    ("Allow".to_string(), ALLOWED_METHODS.join(", ")),
+                ],
+            };
+        }
+
+        // For HEAD requests, serve but body will be stripped by caller
+        self.serve(path).await
     }
 
     pub async fn serve(&self, path: &str) -> FileResponse {
@@ -98,22 +134,61 @@ impl FileServer {
     }
 
     async fn serve_file(&self, path: &Path) -> FileResponse {
-        match fs::read(path).await {
-            Ok(content) => {
-                let mime = mime_guess::from_path(path)
-                    .first_or_octet_stream()
-                    .to_string();
+        // Get file metadata for ETag and Last-Modified
+        let metadata = match fs::metadata(path).await {
+            Ok(m) => m,
+            Err(_) => return self.error_response(StatusCode::INTERNAL_SERVER_ERROR, "Metadata error"),
+        };
 
-                debug!(path = ?path, mime = %mime, "Serving file");
+        let content = match fs::read(path).await {
+            Ok(c) => c,
+            Err(_) => return self.error_response(StatusCode::INTERNAL_SERVER_ERROR, "Read error"),
+        };
 
-                FileResponse {
-                    status: StatusCode::OK,
-                    content_type: mime,
-                    body: Bytes::from(content),
-                    headers: vec![],
+        let mime = mime_guess::from_path(path)
+            .first_or_octet_stream()
+            .to_string();
+
+        debug!(path = ?path, mime = %mime, "Serving file");
+
+        let mut headers = Vec::new();
+
+        // RFC 7232 Section 2.3: ETag
+        // Generate ETag from file size and modification time
+        let _etag = if let Ok(modified) = metadata.modified() {
+            let duration = modified.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default();
+            let etag_value = format!("\"{:x}-{:x}\"", metadata.len(), duration.as_secs());
+            headers.push(("ETag".to_string(), etag_value.clone()));
+            Some(etag_value)
+        } else {
+            None
+        };
+
+        // RFC 7232 Section 2.2: Last-Modified
+        if let Ok(modified) = metadata.modified() {
+            if let Ok(duration) = modified.duration_since(SystemTime::UNIX_EPOCH) {
+                let datetime = chrono::DateTime::<chrono::Utc>::from_timestamp(
+                    duration.as_secs() as i64,
+                    duration.subsec_nanos(),
+                );
+                if let Some(dt) = datetime {
+                    let last_modified = dt.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
+                    headers.push(("Last-Modified".to_string(), last_modified));
                 }
             }
-            Err(_) => self.error_response(StatusCode::INTERNAL_SERVER_ERROR, "Read error"),
+        }
+
+        // RFC 7233 Section 2.3: Accept-Ranges
+        headers.push(("Accept-Ranges".to_string(), "bytes".to_string()));
+
+        // Cache-Control for static files
+        headers.push(("Cache-Control".to_string(), "public, max-age=3600".to_string()));
+
+        FileResponse {
+            status: StatusCode::OK,
+            content_type: mime,
+            body: Bytes::from(content),
+            headers,
         }
     }
 

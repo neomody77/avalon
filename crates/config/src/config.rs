@@ -36,15 +36,120 @@ pub struct Config {
     /// Server configurations
     #[serde(default)]
     pub servers: Vec<ServerConfig>,
+
+    /// Simplified HTTP configuration (alternative to servers)
+    /// When present, creates a default server with the specified bind address
+    #[serde(default)]
+    pub http: Option<SimpleHttpConfig>,
+
+    /// Simplified routes configuration (alternative to servers.routes)
+    /// Used together with `http` for simple single-server setups
+    #[serde(default)]
+    pub routes: Vec<SimpleRouteConfig>,
+
+    /// Global compression settings (used with simplified config)
+    #[serde(default)]
+    pub compression: Option<CompressionConfig>,
+}
+
+/// Simplified HTTP configuration for single-server setups
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SimpleHttpConfig {
+    /// Bind address (e.g., "0.0.0.0:8000" or ":8000")
+    pub bind: String,
+}
+
+/// Simplified route configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SimpleRouteConfig {
+    /// Match path pattern (e.g., "/*", "/api/*")
+    #[serde(rename = "match")]
+    pub match_pattern: String,
+
+    /// Handler configuration
+    pub handler: HandlerConfig,
+}
+
+/// Global compression configuration
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CompressionConfig {
+    /// Enable gzip compression
+    #[serde(default = "default_true")]
+    pub gzip: bool,
+
+    /// Enable brotli compression
+    #[serde(default = "default_true")]
+    pub brotli: bool,
+
+    /// Minimum response size to compress (bytes)
+    #[serde(default = "default_min_size")]
+    pub min_size: usize,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_min_size() -> usize {
+    1024
 }
 
 impl Config {
     /// Load configuration from a file
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, ConfigError> {
         let content = std::fs::read_to_string(path)?;
-        let config: Config = toml::from_str(&content)?;
+        let mut config: Config = toml::from_str(&content)?;
+
+        // Convert simplified config to standard format
+        config.normalize();
+
         config.validate()?;
         Ok(config)
+    }
+
+    /// Convert simplified config format to standard format
+    /// This allows users to use either:
+    /// - Standard format: [[servers]] with routes
+    /// - Simplified format: [http] with [[routes]]
+    fn normalize(&mut self) {
+        // If simplified http config is present and no servers defined
+        if let Some(http_config) = &self.http {
+            if self.servers.is_empty() && !self.routes.is_empty() {
+                // Convert simplified routes to standard format
+                let routes: Vec<RouteConfig> = self.routes.iter().map(|simple| {
+                    // Handle wildcard patterns:
+                    // "/*" or "*" means match all paths (path: None)
+                    // Other patterns are used as prefix matches
+                    let path = if simple.match_pattern == "/*" || simple.match_pattern == "*" {
+                        None
+                    } else {
+                        // Strip trailing * for prefix matching
+                        let pattern = simple.match_pattern.trim_end_matches('*');
+                        Some(vec![pattern.to_string()])
+                    };
+
+                    RouteConfig {
+                        match_rule: MatchConfig {
+                            path,
+                            host: None,
+                            method: None,
+                            header: None,
+                        },
+                        handle: simple.handler.clone(),
+                    }
+                }).collect();
+
+                // Create a default server with the simplified config
+                let server = ServerConfig {
+                    name: "default".to_string(),
+                    listen: vec![http_config.bind.clone()],
+                    routes,
+                    https_redirect: false,
+                };
+
+                self.servers.push(server);
+            }
+        }
     }
 
     /// Validate the configuration
@@ -276,6 +381,70 @@ pub struct GlobalConfig {
     /// OpenTelemetry tracing configuration
     #[serde(default)]
     pub tracing: TracingConfig,
+
+    /// Security headers configuration
+    #[serde(default)]
+    pub security_headers: SecurityHeadersConfig,
+}
+
+/// Security headers configuration (OWASP best practices)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecurityHeadersConfig {
+    /// Enable security headers (default: false for backward compatibility)
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Strict-Transport-Security header (HSTS)
+    /// Example: "max-age=31536000; includeSubDomains"
+    #[serde(default)]
+    pub hsts: Option<String>,
+
+    /// X-Frame-Options header
+    /// Example: "DENY" or "SAMEORIGIN"
+    #[serde(default)]
+    pub x_frame_options: Option<String>,
+
+    /// X-Content-Type-Options header
+    /// Usually: "nosniff"
+    #[serde(default = "default_x_content_type_options")]
+    pub x_content_type_options: Option<String>,
+
+    /// X-XSS-Protection header
+    /// Example: "1; mode=block"
+    #[serde(default)]
+    pub x_xss_protection: Option<String>,
+
+    /// Content-Security-Policy header
+    #[serde(default)]
+    pub content_security_policy: Option<String>,
+
+    /// Referrer-Policy header
+    /// Example: "strict-origin-when-cross-origin"
+    #[serde(default)]
+    pub referrer_policy: Option<String>,
+
+    /// Permissions-Policy header
+    #[serde(default)]
+    pub permissions_policy: Option<String>,
+}
+
+impl Default for SecurityHeadersConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            hsts: None,
+            x_frame_options: None,
+            x_content_type_options: Some("nosniff".to_string()),
+            x_xss_protection: None,
+            content_security_policy: None,
+            referrer_policy: None,
+            permissions_policy: None,
+        }
+    }
+}
+
+fn default_x_content_type_options() -> Option<String> {
+    Some("nosniff".to_string())
 }
 
 /// OpenTelemetry tracing configuration
@@ -457,6 +626,7 @@ impl Default for GlobalConfig {
             cache: CacheOptions::default(),
             grace_period: default_grace_period(),
             tracing: TracingConfig::default(),
+            security_headers: SecurityHeadersConfig::default(),
         }
     }
 }
@@ -1759,5 +1929,115 @@ allow_network = false
 
         let json_wasm = serde_json::to_string(&PluginType::Wasm).unwrap();
         assert_eq!(json_wasm, "\"wasm\"");
+    }
+
+    #[test]
+    fn test_simplified_config() {
+        let toml = r#"
+[tls]
+acme_enabled = false
+
+[http]
+bind = "0.0.0.0:8000"
+
+[[routes]]
+match = "/*"
+
+[routes.handler]
+type = "reverse_proxy"
+upstreams = ["127.0.0.1:9080"]
+"#;
+
+        let mut config: Config = toml::from_str(toml).unwrap();
+        config.normalize();
+        config.validate().unwrap();
+
+        // Should have been converted to a server
+        assert_eq!(config.servers.len(), 1);
+        assert_eq!(config.servers[0].name, "default");
+        assert_eq!(config.servers[0].listen, vec!["0.0.0.0:8000"]);
+        assert_eq!(config.servers[0].routes.len(), 1);
+
+        // Check that route was converted correctly
+        // "/*" is a wildcard, so path should be None (match all paths)
+        let route = &config.servers[0].routes[0];
+        assert_eq!(route.match_rule.path, None);
+
+        if let HandlerConfig::ReverseProxy(proxy) = &route.handle {
+            assert_eq!(proxy.upstreams, vec!["127.0.0.1:9080"]);
+        } else {
+            panic!("Expected ReverseProxy handler");
+        }
+    }
+
+    #[test]
+    fn test_simplified_config_with_compression() {
+        let toml = r#"
+[tls]
+acme_enabled = false
+
+[http]
+bind = ":8080"
+
+[compression]
+gzip = true
+brotli = true
+min_size = 256
+
+[[routes]]
+match = "/api/*"
+
+[routes.handler]
+type = "reverse_proxy"
+upstreams = ["backend:8000"]
+"#;
+
+        let mut config: Config = toml::from_str(toml).unwrap();
+        config.normalize();
+        config.validate().unwrap();
+
+        assert_eq!(config.servers.len(), 1);
+        assert!(config.compression.is_some());
+        let comp = config.compression.as_ref().unwrap();
+        assert!(comp.gzip);
+        assert!(comp.brotli);
+        assert_eq!(comp.min_size, 256);
+    }
+
+    #[test]
+    fn test_simplified_config_does_not_override_servers() {
+        // If servers are defined, http/routes should be ignored
+        let toml = r#"
+[tls]
+acme_enabled = false
+
+[http]
+bind = "0.0.0.0:8000"
+
+[[routes]]
+match = "/*"
+
+[routes.handler]
+type = "reverse_proxy"
+upstreams = ["127.0.0.1:9080"]
+
+[[servers]]
+name = "main"
+listen = [":80"]
+
+[[servers.routes]]
+[servers.routes.handle]
+type = "static_response"
+body = "Hello"
+"#;
+
+        let mut config: Config = toml::from_str(toml).unwrap();
+        config.normalize();
+        config.validate().unwrap();
+
+        // Should still have only the explicitly defined server
+        assert_eq!(config.servers.len(), 1);
+        assert_eq!(config.servers[0].name, "main");
+        assert_eq!(config.servers[0].listen, vec![":80"]);
     }
 }
