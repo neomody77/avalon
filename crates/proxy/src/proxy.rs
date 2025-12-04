@@ -588,6 +588,8 @@ impl ProxyHttp for AvalonProxy {
                     let mut header = ResponseHeader::build(StatusCode::MOVED_PERMANENTLY, None)?;
                     header.insert_header("Location", location)?;
                     header.insert_header("Server", "avalon")?;
+                    // RFC 7230: Redirect responses should include Content-Length: 0
+                    header.insert_header("Content-Length", "0")?;
 
                     session.write_response_header(Box::new(header), true).await?;
                     return Ok(true);
@@ -1691,6 +1693,8 @@ impl AvalonProxy {
                 let mut header = ResponseHeader::build(status, None)?;
                 header.insert_header("Location", location)?;
                 header.insert_header("Server", "avalon")?;
+                // RFC 7230: Redirect responses should include Content-Length: 0
+                header.insert_header("Content-Length", "0")?;
 
                 session.write_response_header(Box::new(header), true).await?;
                 Ok(true)
